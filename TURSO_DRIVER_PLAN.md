@@ -108,9 +108,16 @@ third-party drivers.
   Multi-statement splitting via `turso_parser` worked (no fallback needed).
 - [x] Phase 3 — `push`/`pull`/`checkpoint`/`sync_stats` on `TursoConnectOptions`
   (`pool.connect_options().push()`), `auth_token_fn`, per-transaction mode via `begin_with`.
-- [ ] Phase 4 — sea-schema fork done (branch `turso`, commit 4a480f6); SeaORM fork in progress.
-- [ ] Phase 5 — porting sqlx's SQLite test suite in progress; SeaORM suite, cloud and sync
-  tests pending.
+- [x] Phase 4 — sea-schema fork (branch `turso`, 4a480f6); sea-orm fork (branch `turso`,
+  3bed3073 backend, 63e118bf tests, 72e358da sea-orm-migration). `sqlx-turso` feature in both;
+  `Database::connect` routes turso/libsql/http/https; `get_turso_connection_pool()` for sync;
+  `map_sqlx_turso_opts`/`_pool_opts`/`_before_acquire` hooks; bind errors propagate as
+  `DbErr` instead of upstream's panics. Tests: sea-orm 10 Turso tests + 259 lib tests,
+  migration Turso test + main suite with `DATABASE_URL=turso::memory:` all pass.
+- [ ] Phase 5 — done: sqlx SQLite suite ported (120 pass / 3 ignored), MVCC conflict test,
+  cloud serverless + sync tests written (env-gated, NOT yet run against Turso Cloud).
+  Pending: run cloud tests with real credentials; run sea-orm's full integration suite
+  against Turso (needs several GB of free disk).
 
 ## Implementation decisions (made during build)
 - Branches: root repo `sqlx-turso`; sea-orm fork `turso` (based on master, 18 commits past
@@ -138,6 +145,13 @@ third-party drivers.
   sqlx-turso, because the set of `Value` variants depends on sea-query features that sea-orm
   forwards 1:1.
 - sea-schema: `sqlx-turso` feature enables `sea-query/thread-safe` (as sea-query-sqlx does).
+
+## Open questions for the user (2026-11-03)
+- Forward sqlx-turso `sync` / `serverless` through sea-orm features?
+- `sqlcipher_key` on a Turso URL currently errors (`BackendNotSupported`); keep?
+- `PoolConnection<Turso>` is 496 bytes (clippy `large_enum_variant` on sea-orm
+  `InnerConnection` with `mock`); box in sqlx-turso, box in sea-orm, or leave?
+- sea-orm-sync and sea-orm-cli have no Turso support (out of scope unless requested).
 
 ## Turso incompatibilities found
 Phase 0 verified working (MVCC on and off): INSERT/UPDATE/UPSERT `RETURNING`; `last_insert_rowid`;
