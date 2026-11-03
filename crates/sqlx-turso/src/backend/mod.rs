@@ -109,6 +109,9 @@ impl AnyConn {
                     })
                     .collect::<Result<Vec<Vec<Value>>, _>>()
                     .sqlx()?;
+                // Turso Cloud can pair rows from a just-changed schema with the old column
+                // list. Only a width mismatch is detectable; same-width changes (reordered or
+                // renamed columns) are not (plan, incompatibility 11).
                 if rows.iter().any(|row| row.len() != columns.len()) {
                     return Err(schema_changed_error());
                 }
@@ -269,6 +272,24 @@ impl Cursor {
                 }
             }
             Self::Buffered { rows, .. } => Ok(rows.next()),
+        }
+    }
+
+    /// Ends the statement before all rows were read, reporting any error the engine raises
+    /// on completion. A write with `RETURNING` has done its work by the time its first row
+    /// is returned, and commits (in autocommit mode) when it is reset; if that fails the
+    /// write is rolled back, so the error must reach the caller rather than be dropped.
+    pub(crate) fn finish(&mut self) -> Result<(), Error> {
+        match self {
+            Self::Embedded { stmt, rows, .. } => {
+                if rows.is_none() {
+                    return Ok(());
+                }
+                let result = stmt.reset();
+                rows.take();
+                result.sqlx()
+            }
+            Self::Buffered { .. } => Ok(()),
         }
     }
 

@@ -119,11 +119,17 @@ impl TursoConnection {
                 while let Some(values) = next {
                     logger.increment_rows_returned();
                     rows_returned += 1;
-                    r#yield!(Either::Right(TursoRow::new(values, &columns, &column_names)));
+                    let row = TursoRow::new(values, &columns, &column_names);
 
                     if limit.is_some_and(|limit| rows_returned >= limit) {
+                        // Finish the statement before handing out the last row: a write
+                        // with RETURNING commits (and can still fail) when it completes,
+                        // and the caller stops reading once it has its row.
+                        cursor.finish()?;
+                        r#yield!(Either::Right(row));
                         return Ok(());
                     }
+                    r#yield!(Either::Right(row));
                     next = cursor.next().await?;
                 }
 

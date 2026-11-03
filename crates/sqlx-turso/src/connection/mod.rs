@@ -77,8 +77,9 @@ pub(crate) fn no_transaction_error() -> Error {
 pub(crate) fn aborted_error() -> Error {
     TursoError::new(
         TursoErrorKind::Aborted,
-        "the transaction was rolled back by the database (write conflict, failed commit or \
-         lost Turso Cloud stream); roll back or drop it before running more statements",
+        "the transaction is no longer open on the database (rolled back after a write \
+         conflict, failed commit or lost Turso Cloud stream, or ended by a COMMIT/ROLLBACK \
+         run as plain SQL); roll back or drop it before running more statements",
     )
     .into()
 }

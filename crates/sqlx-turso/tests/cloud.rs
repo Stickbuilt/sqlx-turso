@@ -347,7 +347,7 @@ mod serverless {
     }
 
     #[tokio::test]
-    async fn migrations_run_on_concurrent_default_url() {
+    async fn migrations_run_with_concurrent_writes() {
         use sqlx_core::migrate::{Migration, MigrationType, Migrator};
         use sqlx_core::sql_str::SqlSafeStr;
         let Some((url, token)) = cloud() else { return };

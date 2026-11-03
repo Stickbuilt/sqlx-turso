@@ -51,12 +51,9 @@ impl MigrateDatabase for Turso {
         match &options.target {
             Target::Memory => Ok(()),
             Target::File(path) => {
+                let side_files = side_files(path)?;
                 fs::remove_file(path).await?;
-                // Remove the engine's side files if present.
-                for suffix in ["-wal", "-shm", "-log"] {
-                    let mut side = path.clone().into_os_string();
-                    side.push(suffix);
-                    let side = std::path::PathBuf::from(side);
+                for side in side_files {
                     if side.exists() {
                         fs::remove_file(&side).await?;
                     }
@@ -70,6 +67,71 @@ impl MigrateDatabase for Turso {
             )),
         }
     }
+}
+
+/// Files the engine keeps next to an embedded database at `path`.
+///
+/// turso writes `<path>-wal`, the MVCC logical log at `path.with_extension("db-log")`, and,
+/// for synced databases, `-info`, `-changes`, `-wal-revert` and replace-base recovery files
+/// (turso_core `storage/journal_mode.rs`, turso_sync_engine `database_sync_engine.rs`). A log
+/// left behind would be replayed into a database later created at the same path.
+fn side_files(path: &std::path::Path) -> Result<Vec<std::path::PathBuf>, Error> {
+    let with_suffix = |suffix: &str| {
+        let mut side = path.as_os_str().to_owned();
+        side.push(suffix);
+        std::path::PathBuf::from(side)
+    };
+    let mut files: Vec<_> = [
+        "-wal",
+        "-shm",
+        "-wal-revert",
+        "-info",
+        "-changes",
+        "-replace-base-apply",
+    ]
+    .into_iter()
+    .map(with_suffix)
+    .collect();
+
+    // The MVCC log name ignores the database's own extension, so `app.sqlite` and `app.db`
+    // in one directory would share `app.db-log`. Removing it then could destroy the other
+    // database's committed data, and keeping it would corrupt a recreated database; refuse.
+    let log = path.with_extension("db-log");
+    let log_owner = path.with_extension("db");
+    if log.exists() && log_owner != *path && log_owner.exists() {
+        return Err(Error::Configuration(
+            format!(
+                "cannot drop {}: its MVCC log {} is shared with {}",
+                path.display(),
+                log.display(),
+                log_owner.display()
+            )
+            .into(),
+        ));
+    }
+    files.push(log);
+
+    // Replace-base recovery backups: `<path>-replace-base-apply-<name>.backup`.
+    if let (Some(dir), Some(name)) = (path.parent(), path.file_name()) {
+        let dir = if dir.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            dir
+        };
+        let mut prefix = name.to_owned();
+        prefix.push("-replace-base-apply-");
+        let prefix = prefix.to_string_lossy().into_owned();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let file = entry.file_name();
+                let file = file.to_string_lossy();
+                if file.starts_with(&prefix) && file.ends_with(".backup") {
+                    files.push(entry.path());
+                }
+            }
+        }
+    }
+    Ok(files)
 }
 
 impl Migrate for TursoConnection {
@@ -159,6 +221,10 @@ CREATE TABLE IF NOT EXISTS {table_name} (
         })
     }
 
+    // There is no advisory lock to take (as with sqlx-sqlite). Two processes migrating the same
+    // database at once both try each pending migration; each runs in its own `BEGIN IMMEDIATE`
+    // transaction and records its version under a primary key, so the loser fails and rolls
+    // back instead of applying a migration twice.
     fn lock(&mut self) -> BoxFuture<'_, Result<(), MigrateError>> {
         Box::pin(async move { Ok(()) })
     }
@@ -260,7 +326,7 @@ CREATE TABLE IF NOT EXISTS {table_name} (
 }
 
 /// Open the transaction a migration runs in. DDL is rejected inside `BEGIN CONCURRENT`
-/// (the default with `concurrent_writes(true)` and for `turso://` / `https://` URLs), so a
+/// (the default with `concurrent_writes(true)`), so a
 /// top-level migration transaction always uses `BEGIN IMMEDIATE`. Inside a caller's
 /// transaction a savepoint is used, as with `begin()`.
 async fn begin_migration(

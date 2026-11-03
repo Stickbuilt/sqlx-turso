@@ -14,8 +14,9 @@ plus a `SqlxTurso` backend variant in private forks of SeaORM / sea-schema / sea
   (`turso_serverless`), local-with-sync (push/pull), concurrent writes (MVCC / `BEGIN CONCURRENT`).
 - **URL schemes:** `turso:` and `libsql:` (local: `turso:path`, `turso::memory:`;
   remote: `turso://host`, `libsql://host`), plus `https://` / `http://` for Turso Cloud
-  (same as toasty). Sync mode configured via the builder, not the URL. `libsql` URLs default to
-  `BEGIN`; others default to `BEGIN CONCURRENT` on remote (toasty behaviour).
+  (same as toasty). Sync mode configured via the builder, not the URL. Every target defaults to `BEGIN`;
+  `concurrent_writes(true)` is the single switch to `BEGIN CONCURRENT` (toasty's remote
+  `BEGIN CONCURRENT` default was dropped: Turso Cloud rejects it unless enabled per database).
 - **Cloud tests:** read `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`; skipped when unset.
 - **Versions:** `sqlx-core = "=0.9.0"` from crates.io (matches sea-orm 2.0.4); `turso` 0.8.x
   (`default-features = false`, like toasty); `turso_serverless` 0.1.3; sea-schema 0.18.1.
@@ -156,6 +157,25 @@ third-party drivers.
   the transaction fail with `TursoErrorKind::Aborted` (code 516). Write conflicts report 517.
 - Review fixes 2026-11-04: sqlx-turso c98f4df..88675da; sea-orm 77789385..c6e6abbc; sea-schema
   d3dfaf5, 842c564.
+- Second review (2026-11-04, independent, whole project) fixes:
+  - Single-row fetches (`fetch_one`/`fetch_optional`, so every SeaORM `insert`/`update` with
+    RETURNING) finish the statement before returning the row: a write with RETURNING commits on
+    reset and can still fail there (deferred FK, busy, I/O, MVCC commit); the error used to be
+    dropped while the caller got `Ok(row)` for a rolled-back write. A `fetch()` stream dropped
+    part-way through a RETURNING write still can't report such an error (Drop can't fail):
+    read write streams to the end. Inside a transaction the abort is caught by the next statement.
+  - Conflict detection matches the engine's exact messages, not any text containing "conflict".
+  - `drop_database` removes `<path>-wal`, the MVCC log `path.with_extension("db-log")` and the
+    sync engine's `-info`/`-changes`/`-wal-revert`/replace-base files; it refuses to drop when
+    the log is shared with a sibling `<stem>.db` (see incompatibility 12).
+  - An auth token over plain `http://` is refused unless the host is loopback.
+  - sea-orm-migration `fresh` on SQLite pins one connection with a transaction for
+    `foreign_keys = OFF` / drops / restore (Turso honours the pragma inside a transaction; SQLite
+    ignores it there and falls back to the old path, which is safe with SeaORM's 1-connection
+    sqlx-sqlite default). Restores the original setting rather than forcing ON.
+  - Ported sqlx's pre-epoch REAL datetime fix (upstream 4fc0fb82).
+  - Migrations have no lock (as sqlx-sqlite): concurrent migrators each run a migration in
+    `BEGIN IMMEDIATE`; the loser fails on the version primary key and rolls back.
 - SeaORM value binding (`sea_query::Value` -> `TursoArguments`) lives in the sea-orm fork, not
   sqlx-turso, because the set of `Value` variants depends on sea-query features that sea-orm
   forwards 1:1.
@@ -239,4 +259,11 @@ column layout); `PRAGMA foreign_keys` read/write (FKs enforced); multi-statement
     without concurrent writes enabled reject it as a syntax error. Hence BEGIN is the default.
 11. **Turso Cloud can return stale column metadata right after a schema change** (rows have the
     new width, columns the old list; ~1 in 6 runs under parallel DDL). The driver rejects such
-    results with the retryable `Schema` error.
+    results with the retryable `Schema` error. Only a width mismatch is detectable: a concurrent
+    schema change that keeps the column count (columns reordered or renamed) can still pair rows
+    with stale names, and name-based decoding (SeaORM) would then read the wrong fields. Avoid
+    running DDL on Turso Cloud while the app is serving queries against the changed tables.
+12. **The MVCC log ignores the database file's extension:** turso writes it to
+    `path.with_extension("db-log")`, so `app.sqlite` and `app.db` in one directory share
+    `app.db-log`. Don't keep two MVCC databases whose names differ only by extension;
+    `drop_database` refuses in that case.

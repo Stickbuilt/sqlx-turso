@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use sqlx::{Connection, Executor, Row};
+use sqlx::{ConnectOptions, Connection, Executor, Row};
 use sqlx_core::migrate::{Migration, MigrationType, Migrator};
 use sqlx_core::sql_str::SqlStr;
 use sqlx_core::transaction::TransactionManager;
@@ -607,6 +607,41 @@ async fn remote_rejects_per_connection_settings_and_bad_urls() {
         assert!(msg.contains("Turso Cloud URL"), "{url}: {msg}");
         assert!(!msg.contains("secret"), "{msg}");
     }
+
+    // Auth tokens never go over plain http:// except to a local development server.
+    let msg = config_error(
+        TursoConnectOptions::new()
+            .remote("http://db.example.invalid")
+            .auth_token("secret")
+            .connect()
+            .await,
+    );
+    assert!(msg.contains("unencrypted"), "{msg}");
+    #[cfg(feature = "sync")]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let msg = config_error(
+            TursoConnectOptions::new()
+                .filename(dir.path().join("replica.db"))
+                .create_if_missing(true)
+                .sync_url("http://db.example.invalid")
+                .auth_token("secret")
+                .connect()
+                .await,
+        );
+        assert!(msg.contains("unencrypted"), "{msg}");
+    }
+    for url in ["http://localhost:1", "http://127.0.0.1:1", "http://[::1]:1"] {
+        let result = TursoConnectOptions::new()
+            .remote(url)
+            .auth_token("secret")
+            .connect()
+            .await;
+        assert!(
+            !matches!(result, Err(sqlx::Error::Configuration(_))),
+            "{url}: {result:?}"
+        );
+    }
 }
 
 #[cfg(feature = "serverless")]
@@ -622,4 +657,94 @@ async fn remote_connect_contacts_the_server() {
         .connect_with(opts)
         .await;
     assert!(pool.is_err());
+}
+
+/// A write that fails when it completes (here: a deferred foreign key checked at commit) must
+/// not report success just because its first `RETURNING` row was already produced.
+#[tokio::test]
+async fn returning_write_failing_at_completion_is_an_error() {
+    let mut conn = TursoConnection::connect("turso::memory:").await.unwrap();
+    conn.execute(
+        "CREATE TABLE p(id INTEGER PRIMARY KEY);
+         CREATE TABLE c(id INTEGER PRIMARY KEY,
+                        p INT REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED);",
+    )
+    .await
+    .unwrap();
+
+    let res = sqlx::query("INSERT INTO c(p) VALUES (99) RETURNING id")
+        .fetch_one(&mut conn)
+        .await;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM c")
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    let err = res.map(|r| r.get::<i64, _>(0)).expect_err("the insert was rolled back");
+    assert_eq!(
+        err.as_database_error().map(|e| e.kind()),
+        Some(sqlx::error::ErrorKind::ForeignKeyViolation),
+        "{err}"
+    );
+    assert_eq!(count, 0);
+
+    // A successful RETURNING write read through fetch_one is committed.
+    conn.execute("INSERT INTO p VALUES (99)").await.unwrap();
+    let id: i64 = sqlx::query_scalar("INSERT INTO c(p) VALUES (99) RETURNING id")
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    let stored: i64 = sqlx::query_scalar("SELECT id FROM c")
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(stored, id);
+}
+
+/// Dropping a database must remove the engine's MVCC log so a recreated database starts empty.
+#[tokio::test]
+async fn drop_database_removes_mvcc_log() {
+    use sqlx_core::migrate::MigrateDatabase;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.sqlite");
+    let opts = || {
+        TursoConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .concurrent_writes(true)
+    };
+    {
+        let mut conn = opts().connect().await.unwrap();
+        conn.execute("CREATE TABLE t(x INTEGER); INSERT INTO t VALUES (1)")
+            .await
+            .unwrap();
+        conn.close().await.unwrap();
+    }
+    let before: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    let url = format!("turso:{}", path.display());
+    sqlx_turso::Turso::drop_database(&url).await.unwrap();
+    let after: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(after.is_empty(), "before drop: {before:?}; left after drop: {after:?}");
+}
+
+/// `app.sqlite` and `app.db` share turso's MVCC log; dropping one must not delete it.
+#[tokio::test]
+async fn drop_database_refuses_shared_mvcc_log() {
+    use sqlx_core::migrate::MigrateDatabase;
+    let dir = tempfile::tempdir().unwrap();
+    let sqlite = dir.path().join("app.sqlite");
+    std::fs::write(&sqlite, b"").unwrap();
+    std::fs::write(dir.path().join("app.db"), b"").unwrap();
+    std::fs::write(dir.path().join("app.db-log"), b"x").unwrap();
+
+    let err = sqlx_turso::Turso::drop_database(&format!("turso:{}", sqlite.display()))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("shared"), "{err}");
+    assert!(sqlite.exists() && dir.path().join("app.db-log").exists());
 }

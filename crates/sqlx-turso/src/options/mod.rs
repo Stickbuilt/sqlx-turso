@@ -725,6 +725,10 @@ impl ConnectOptions for TursoConnectOptions {
         if let Target::Remote { url, .. } = &self.target {
             self.validate_remote(url)?;
         }
+        #[cfg(feature = "sync")]
+        if let Some(url) = &self.sync.remote_url {
+            self.check_token_transport(url)?;
+        }
 
         let mut conn = TursoConnection::establish(self).await.sqlx()?;
 
@@ -775,6 +779,31 @@ impl TursoConnectOptions {
 
     /// Reject remote configurations that can't work: malformed URLs and per-connection
     /// settings that would silently revert when the HTTP stream expires.
+    /// Refuse to send an auth token over plain `http://` to anything but a loopback address
+    /// (a local development server); elsewhere the token would cross the network in clear.
+    fn check_token_transport(&self, url: &str) -> Result<(), Error> {
+        if self.auth_token.is_none() {
+            return Ok(());
+        }
+        let Ok(parsed) = Url::parse(url) else {
+            return Ok(()); // reported by the URL validation
+        };
+        let loopback = match parsed.host() {
+            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        };
+        if parsed.scheme() == "http" && !loopback {
+            return Err(Error::Configuration(
+                "refusing to send the auth token over unencrypted http:// to a non-local host; \
+                 use https:// or libsql://"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_remote(&self, url: &str) -> Result<(), Error> {
         let parsed = Url::parse(url).map_err(|e| {
             Error::Configuration(format!("invalid Turso Cloud URL {url:?}: {e}").into())
@@ -800,6 +829,8 @@ impl TursoConnectOptions {
                     .into(),
             ));
         }
+
+        self.check_token_transport(url)?;
 
         if self.foreign_keys.is_some() || !self.pragmas.is_empty() {
             return Err(Error::Configuration(

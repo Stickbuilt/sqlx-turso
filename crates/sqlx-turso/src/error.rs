@@ -93,9 +93,16 @@ impl TursoError {
     }
 
     fn is_conflict_message(&self) -> bool {
-        let m = self.message.to_ascii_lowercase();
-        // "conflicting ON CONFLICT clauses" and similar are SQL errors, not conflicts.
-        (m.contains("conflict") && !m.contains("on conflict")) || m.contains("schema changed")
+        // Only the engine's own conflict messages count (turso_core `LimboError`:
+        // `WriteWriteConflict`, `SchemaConflict`, `SchemaUpdated`, `Conflict(..)`, plus
+        // SQLite's SQLITE_SCHEMA text from Turso Cloud). Matching on a bare "conflict"
+        // would misread errors that merely name a table or column like `user_conflicts`.
+        let m = self.message.trim_start_matches("SQLite error: ");
+        m == "Write-write conflict"
+            || m == "Database schema conflict"
+            || m == "Database schema changed"
+            || m == "database schema has changed"
+            || m.starts_with("Conflict: ")
     }
 
     /// The SQLite (extended) result code equivalent to this error.
@@ -265,8 +272,10 @@ mod tests {
         for m in [
             "Write-write conflict",
             "Database schema conflict",
-            "commit aborted due to exclusive tx conflict",
-            "SQLite error: schema changed",
+            "Database schema changed",
+            "Conflict: WAL changed",
+            "SQLite error: Write-write conflict",
+            "SQLite error: database schema has changed",
         ] {
             let e = TursoError::new(TursoErrorKind::Error, m);
             assert!(e.is_conflict(), "{m}");
@@ -276,6 +285,9 @@ mod tests {
         for m in [
             "conflicting ON CONFLICT clauses specified",
             "no such table: t",
+            "no such table: user_conflicts",
+            "no such column: conflict_count",
+            "SQLite error: no such table: write_conflicts",
         ] {
             let e = TursoError::new(TursoErrorKind::Error, m);
             assert!(!e.is_conflict(), "{m}");
