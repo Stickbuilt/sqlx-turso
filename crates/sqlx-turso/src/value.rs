@@ -272,13 +272,14 @@ fn format_real(f: f64) -> String {
         };
     }
 
-    let exponent = f.abs().log10().floor() as i32;
-    if !(-5..15).contains(&exponent) {
-        // Scientific notation with 15 significant digits, trailing zeros trimmed.
-        let s = format!("{:.14e}", f);
-        let (mantissa, exp) = s.split_once('e').expect("formatted with exponent");
+    // `%g` picks the style from the exponent of the value rounded to the precision
+    // (15 significant digits): scientific below 1e-4 or at 1e15 and above.
+    let scientific = format!("{:.14e}", f);
+    let (mantissa, exp) = scientific.split_once('e').expect("formatted with exponent");
+    let exponent: i32 = exp.parse().expect("valid exponent");
+
+    if !(-4..15).contains(&exponent) {
         let mantissa = trim_fraction(mantissa);
-        let exp: i32 = exp.parse().expect("valid exponent");
         let mantissa = if mantissa.contains('.') {
             mantissa.to_string()
         } else {
@@ -286,12 +287,12 @@ fn format_real(f: f64) -> String {
         };
         return format!(
             "{mantissa}e{}{:02}",
-            if exp < 0 { '-' } else { '+' },
-            exp.abs()
+            if exponent < 0 { '-' } else { '+' },
+            exponent.abs()
         );
     }
 
-    let decimals = (14 - exponent).max(0) as usize;
+    let decimals = (14 - exponent) as usize;
     let s = format!("{:.*}", decimals, f);
     let s = trim_fraction(&s);
     if s.contains('.') {
@@ -334,5 +335,16 @@ mod tests {
         assert_eq!(format_real(123456789.125), "123456789.125");
         assert_eq!(format_real(1e20), "1.0e+20");
         assert_eq!(format_real(1.5e-7), "1.5e-07");
+        // `%!.15g` switches to scientific notation below 1e-4 (not 1e-5).
+        assert_eq!(format_real(0.00001234), "1.234e-05");
+        assert_eq!(format_real(0.0001234), "0.0001234");
+        assert_eq!(format_real(0.0001), "0.0001");
+        assert_eq!(format_real(-0.00001), "-1.0e-05");
+        assert_eq!(format_real(123456789012345.0), "123456789012345.0");
+        assert_eq!(format_real(1e15), "1.0e+15");
+        // Rounding to 15 digits can carry into the next power of ten.
+        assert_eq!(format_real(999999999999999.9), "1.0e+15");
+        assert_eq!(format_real(0.000099999999999999999), "0.0001");
+        assert_eq!(format_real(1.0 / 3.0), "0.333333333333333");
     }
 }
