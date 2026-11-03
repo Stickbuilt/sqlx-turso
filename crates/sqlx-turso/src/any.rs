@@ -90,7 +90,7 @@ impl AnyConnectionBackend for TursoConnection {
 
         Box::pin(self.run(query, args, persistent, None).map(
             move |res: sqlx_core::Result<Either<TursoQueryResult, TursoRow>>| match res? {
-                Either::Left(result) => Ok(Either::Left(map_result(result))),
+                Either::Left(result) => Ok(Either::Left(result.into())),
                 Either::Right(row) => Ok(Either::Right(AnyRow::try_from(&row)?)),
             },
         ))
@@ -130,6 +130,7 @@ impl AnyConnectionBackend for TursoConnection {
         })
     }
 
+    #[cfg(feature = "offline")]
     fn describe(
         &mut self,
         sql: SqlStr,
@@ -224,9 +225,3 @@ fn map_arguments(args: AnyArguments) -> TursoArguments {
     }
 }
 
-fn map_result(res: TursoQueryResult) -> AnyQueryResult {
-    AnyQueryResult {
-        rows_affected: res.rows_affected(),
-        last_insert_id: None,
-    }
-}
