@@ -1,0 +1,55 @@
+[package]
+name = "sqlx-turso"
+version = "0.1.0"
+description = "Turso driver for SQLx: embedded, sync and Turso Cloud (HTTP) databases"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = ["any", "migrate", "json"]
+any = ["sqlx-core/any"]
+json = ["sqlx-core/json"]
+# `sqlx-core/offline` is always enabled: it adds a required `describe()` method to the
+# driver traits, and any crate in the graph may switch it on (e.g. the `sqlx` macros).
+offline = []
+migrate = ["sqlx-core/migrate"]
+
+chrono = ["dep:chrono", "sqlx-core/chrono"]
+time = ["dep:time", "sqlx-core/time"]
+uuid = ["dep:uuid", "sqlx-core/uuid"]
+
+# Local file replicated with Turso Cloud (push / pull).
+sync = ["turso/sync"]
+# Turso Cloud over HTTP.
+serverless = ["dep:turso_serverless"]
+
+# Unused; present only to satisfy the `cfg` checks in `impl_type_checking!`.
+bigdecimal = []
+rust_decimal = []
+
+[dependencies]
+sqlx-core = { workspace = true, features = ["offline"] }
+turso.workspace = true
+turso_parser.workspace = true
+turso_serverless = { workspace = true, optional = true }
+
+futures-core = { version = "0.3.32", default-features = false }
+futures-util = { version = "0.3.32", default-features = false, features = ["alloc", "sink", "std"] }
+url = "2.2.2"
+percent-encoding = "2.3.0"
+log = "0.4.18"
+tracing = { version = "0.1.37", features = ["log"] }
+thiserror = "2.0"
+
+chrono = { version = "0.4.34", default-features = false, features = ["std", "clock"], optional = true }
+time = { version = "0.3.37", features = ["formatting", "parsing", "macros"], optional = true }
+uuid = { version = "1.1.2", optional = true }
+serde = { version = "1.0.219", features = ["derive"] }
+
+[dev-dependencies]
+sqlx = { workspace = true, features = ["runtime-tokio", "macros", "derive"] }
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"
+sqlx-core.workspace = true

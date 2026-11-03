@@ -1,0 +1,8 @@
+/target
+Cargo.lock.bak
+# Reference clones and forks are separate git repositories
+/sqlx/
+/sea-query/
+/toasty/
+/sea-orm/
+/sea-schema/

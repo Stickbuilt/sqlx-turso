@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/sqlx-turso"]
+exclude = ["sqlx", "sea-query", "toasty", "sea-orm", "sea-schema"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+sqlx-core = { version = "=0.9.0", default-features = false }
+sqlx = { version = "=0.9.0", default-features = false }
+# `turso` and `turso_parser` must stay on the same version.
+turso = { version = "=0.8.3", default-features = false }
+turso_parser = "=0.8.3"
+turso_serverless = "=0.1.3"
