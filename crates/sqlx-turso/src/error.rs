@@ -28,6 +28,14 @@ pub enum TursoErrorKind {
     NotADatabase,
     /// The database file is corrupt.
     Corrupt,
+    /// The statement was refused because the database already rolled back the
+    /// connection's open transaction (MVCC write conflict, failed commit, reset Turso
+    /// Cloud stream). Roll back or drop the transaction. Reported as
+    /// `SQLITE_ABORT_ROLLBACK` (516).
+    Aborted,
+    /// The schema changed while a statement was starting, so its result columns no
+    /// longer match; the statement can be run again. Reported as `SQLITE_SCHEMA` (17).
+    Schema,
 }
 
 /// An error returned by the Turso engine or the Turso Cloud server.
@@ -41,6 +49,8 @@ pub struct TursoError {
 // on sqlx-sqlite's codes keep working.
 const SQLITE_ERROR: i32 = 1;
 const SQLITE_BUSY: i32 = 5;
+const SQLITE_SCHEMA: i32 = 17;
+const SQLITE_ABORT_ROLLBACK: i32 = 516;
 const SQLITE_READONLY: i32 = 8;
 const SQLITE_INTERRUPT: i32 = 9;
 const SQLITE_CORRUPT: i32 = 11;
@@ -71,20 +81,30 @@ impl TursoError {
     /// Whether the operation failed because of a conflict with a concurrent
     /// transaction and may succeed if retried (busy database, MVCC write conflict,
     /// concurrent schema change on Turso Cloud).
+    ///
+    /// MVCC write-write conflicts are reported by the engine as generic errors; they are
+    /// given the code `SQLITE_BUSY_SNAPSHOT` (517) here so code-based retry checks work.
     pub fn is_conflict(&self) -> bool {
         match self.kind {
-            TursoErrorKind::Busy | TursoErrorKind::BusySnapshot => true,
-            TursoErrorKind::Error => {
-                self.message.contains("conflict") || self.message.contains("schema changed")
-            }
+            TursoErrorKind::Busy | TursoErrorKind::BusySnapshot | TursoErrorKind::Schema => true,
+            TursoErrorKind::Error => self.is_conflict_message(),
             _ => false,
         }
+    }
+
+    fn is_conflict_message(&self) -> bool {
+        let m = self.message.to_ascii_lowercase();
+        // "conflicting ON CONFLICT clauses" and similar are SQL errors, not conflicts.
+        (m.contains("conflict") && !m.contains("on conflict")) || m.contains("schema changed")
     }
 
     /// The SQLite (extended) result code equivalent to this error.
     pub fn sqlite_code(&self) -> i32 {
         match self.kind {
+            TursoErrorKind::Error if self.is_conflict_message() => SQLITE_BUSY_SNAPSHOT,
             TursoErrorKind::Error => SQLITE_ERROR,
+            TursoErrorKind::Aborted => SQLITE_ABORT_ROLLBACK,
+            TursoErrorKind::Schema => SQLITE_SCHEMA,
             TursoErrorKind::Busy => SQLITE_BUSY,
             TursoErrorKind::BusySnapshot => SQLITE_BUSY_SNAPSHOT,
             TursoErrorKind::Interrupt => SQLITE_INTERRUPT,
@@ -239,6 +259,39 @@ impl IntoSqlxError for turso_serverless::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conflicts_report_busy_snapshot() {
+        for m in [
+            "Write-write conflict",
+            "Database schema conflict",
+            "commit aborted due to exclusive tx conflict",
+            "SQLite error: schema changed",
+        ] {
+            let e = TursoError::new(TursoErrorKind::Error, m);
+            assert!(e.is_conflict(), "{m}");
+            assert_eq!(e.sqlite_code(), SQLITE_BUSY_SNAPSHOT, "{m}");
+            assert_eq!(e.code().as_deref(), Some("517"));
+        }
+        for m in [
+            "conflicting ON CONFLICT clauses specified",
+            "no such table: t",
+        ] {
+            let e = TursoError::new(TursoErrorKind::Error, m);
+            assert!(!e.is_conflict(), "{m}");
+            assert_eq!(e.sqlite_code(), SQLITE_ERROR, "{m}");
+        }
+        assert_eq!(
+            TursoError::new(TursoErrorKind::Busy, "database is locked").sqlite_code(),
+            SQLITE_BUSY
+        );
+        let schema = TursoError::new(TursoErrorKind::Schema, "x");
+        assert!(schema.is_conflict());
+        assert_eq!(schema.sqlite_code(), SQLITE_SCHEMA);
+        let aborted = TursoError::new(TursoErrorKind::Aborted, "x");
+        assert!(!aborted.is_conflict());
+        assert_eq!(aborted.sqlite_code(), SQLITE_ABORT_ROLLBACK);
+    }
 
     #[test]
     fn classifies_embedded_and_cloud_constraint_messages() {
