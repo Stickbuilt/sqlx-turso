@@ -48,12 +48,12 @@ pub(crate) fn columns_of(raw: &[RawColumn]) -> (Arc<Vec<TursoColumn>>, Arc<HashM
 
 impl TursoConnection {
     fn parsed(&mut self, sql: &str, persistent: bool) -> Result<Arc<ParsedQuery>, Error> {
-        if persistent && self.statements.is_enabled() {
-            if let Some(parsed) = self.statements.get_mut(sql) {
+        if persistent && self.state.statements.is_enabled() {
+            if let Some(parsed) = self.state.statements.get_mut(sql) {
                 return Ok(Arc::clone(parsed));
             }
             let parsed = ParsedQuery::parse(sql)?;
-            self.statements.insert(sql, Arc::clone(&parsed));
+            self.state.statements.insert(sql, Arc::clone(&parsed));
             return Ok(parsed);
         }
         ParsedQuery::parse(sql)
@@ -70,7 +70,7 @@ impl TursoConnection {
             self.settle().await?;
 
             let parsed = self.parsed(sql.as_str(), persistent)?;
-            let mut logger = QueryLogger::new(sql, self.log_settings.clone());
+            let mut logger = QueryLogger::new(sql, self.state.log_settings.clone());
             let mut args_used = 0;
             let mut rows_returned = 0;
 
@@ -84,7 +84,7 @@ impl TursoConnection {
                     None => vec![turso::Value::Null; statement.parameters.len()],
                 };
 
-                let mut cursor = self.raw.run(&statement.sql, params, persistent).await?;
+                let mut cursor = self.state.raw.run(&statement.sql, params, persistent).await?;
                 let (columns, column_names) = columns_of(cursor.columns());
 
                 while let Some(values) = cursor.next().await? {
@@ -116,7 +116,7 @@ impl TursoConnection {
         // Like sqlx-sqlite, a multi-statement query describes its last statement.
         let (raw_columns, parameters) = match parsed.statements.last() {
             Some(last) => (
-                self.raw.describe(&last.sql).await?,
+                self.state.raw.describe(&last.sql).await?,
                 parsed.statements.iter().map(|s| s.parameters.len()).sum(),
             ),
             None => (Vec::new(), 0),

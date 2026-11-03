@@ -31,6 +31,11 @@ enum InFlight {
 
 /// A connection to a Turso database.
 pub struct TursoConnection {
+    // Boxed so the connection stays pointer-sized inside pools and enums.
+    pub(crate) state: Box<ConnectionState>,
+}
+
+pub(crate) struct ConnectionState {
     pub(crate) raw: AnyConn,
     pub(crate) options: TursoConnectOptions,
     pub(crate) default_begin: &'static str,
@@ -53,32 +58,34 @@ impl TursoConnection {
         raw.busy_timeout(options.busy_timeout)?;
 
         Ok(Self {
-            raw,
-            options: options.clone(),
-            default_begin: options.default_begin_sql(),
-            transaction_depth: 0,
-            pending_rollbacks: Vec::new(),
-            in_flight: None,
-            broken: false,
-            statements: StatementCache::new(options.statement_cache_capacity),
-            log_settings: options.log_settings.clone(),
+            state: Box::new(ConnectionState {
+                raw,
+                options: options.clone(),
+                default_begin: options.default_begin_sql(),
+                transaction_depth: 0,
+                pending_rollbacks: Vec::new(),
+                in_flight: None,
+                broken: false,
+                statements: StatementCache::new(options.statement_cache_capacity),
+                log_settings: options.log_settings.clone(),
+            }),
         })
     }
 
     /// The options this connection was created from. Connections created from the same
     /// options share one database handle (and, with sync, one replica).
     pub fn connect_options(&self) -> &TursoConnectOptions {
-        &self.options
+        &self.state.options
     }
 
     /// Whether this connection talks to Turso Cloud over HTTP.
     pub fn is_remote(&self) -> bool {
-        self.raw.is_remote()
+        self.state.raw.is_remote()
     }
 
     /// Resolve deferred work left by dropped transactions or cancelled futures.
     pub(crate) async fn settle(&mut self) -> Result<(), Error> {
-        if self.broken {
+        if self.state.broken {
             return Err(Error::Protocol(
                 "connection is in an unknown transaction state after a cancelled \
                  savepoint operation"
@@ -86,39 +93,39 @@ impl TursoConnection {
             ));
         }
 
-        if let Some(in_flight) = self.in_flight.take() {
-            let in_transaction = !self.raw.is_autocommit()?;
+        if let Some(in_flight) = self.state.in_flight.take() {
+            let in_transaction = !self.state.raw.is_autocommit()?;
             match in_flight {
                 InFlight::Begin => {
                     // BEGIN may have run although its future was dropped; nothing owns that
                     // transaction, so undo it.
-                    if in_transaction && self.transaction_depth == 0 {
-                        self.raw.execute("ROLLBACK").await?;
+                    if in_transaction && self.state.transaction_depth == 0 {
+                        self.state.raw.execute("ROLLBACK").await?;
                     }
                 }
                 InFlight::End => {
                     if !in_transaction {
-                        self.transaction_depth = 0;
+                        self.state.transaction_depth = 0;
                     }
                 }
                 InFlight::Savepoint => {
-                    self.broken = true;
+                    self.state.broken = true;
                     return Box::pin(self.settle()).await;
                 }
             }
         }
 
-        while !self.pending_rollbacks.is_empty() {
-            let sql = self.pending_rollbacks.remove(0);
-            if let Err(error) = self.raw.execute(sql.as_str()).await {
+        while !self.state.pending_rollbacks.is_empty() {
+            let sql = self.state.pending_rollbacks.remove(0);
+            if let Err(error) = self.state.raw.execute(sql.as_str()).await {
                 // A failed top-level ROLLBACK usually means the transaction is already gone
                 // (e.g. rolled back by the engine on error); anything else is unknown state.
-                if !self.raw.is_autocommit().unwrap_or(false) {
-                    self.broken = true;
+                if !self.state.raw.is_autocommit().unwrap_or(false) {
+                    self.state.broken = true;
                     return Err(error);
                 }
-                self.pending_rollbacks.clear();
-                self.transaction_depth = 0;
+                self.state.pending_rollbacks.clear();
+                self.state.transaction_depth = 0;
             }
         }
 
@@ -128,60 +135,61 @@ impl TursoConnection {
     pub(crate) async fn begin_tx(&mut self, statement: Option<SqlStr>) -> Result<(), Error> {
         self.settle().await?;
 
-        let depth = self.transaction_depth;
+        let depth = self.state.transaction_depth;
         let is_custom = statement.is_some();
         let sql = match statement {
             Some(_) if depth > 0 => return Err(Error::InvalidSavePointStatement),
             Some(statement) => statement,
-            None if depth == 0 => SqlStr::from_static(self.default_begin),
+            None if depth == 0 => SqlStr::from_static(self.state.default_begin),
             None => begin_ansi_transaction_sql(depth),
         };
 
-        self.in_flight = Some(if depth == 0 {
+        self.state.in_flight = Some(if depth == 0 {
             InFlight::Begin
         } else {
             InFlight::Savepoint
         });
-        let result = self.raw.execute(sql.as_str()).await;
-        self.in_flight = None;
+        let result = self.state.raw.execute(sql.as_str()).await;
+        self.state.in_flight = None;
         result?;
 
-        if is_custom && self.raw.is_autocommit()? {
+        if is_custom && self.state.raw.is_autocommit()? {
             return Err(Error::BeginFailed);
         }
 
-        self.transaction_depth += 1;
+        self.state.transaction_depth += 1;
         Ok(())
     }
 
     pub(crate) async fn commit_tx(&mut self) -> Result<(), Error> {
         self.settle().await?;
-        let depth = self.transaction_depth;
+        let depth = self.state.transaction_depth;
         if depth == 0 {
             return Ok(());
         }
 
-        self.in_flight = Some(if depth == 1 {
+        self.state.in_flight = Some(if depth == 1 {
             InFlight::End
         } else {
             InFlight::Savepoint
         });
         let result = self
+            .state
             .raw
             .execute(commit_ansi_transaction_sql(depth).as_str())
             .await;
-        self.in_flight = None;
+        self.state.in_flight = None;
 
         match result {
             Ok(()) => {
-                self.transaction_depth -= 1;
+                self.state.transaction_depth -= 1;
                 Ok(())
             }
             Err(error) => {
                 // A failed top-level COMMIT may leave the transaction open (e.g. busy) or
                 // closed (e.g. MVCC conflict); keep depth in step with the engine.
-                if depth == 1 && self.raw.is_autocommit().unwrap_or(false) {
-                    self.transaction_depth = 0;
+                if depth == 1 && self.state.raw.is_autocommit().unwrap_or(false) {
+                    self.state.transaction_depth = 0;
                 }
                 Err(error)
             }
@@ -190,30 +198,31 @@ impl TursoConnection {
 
     pub(crate) async fn rollback_tx(&mut self) -> Result<(), Error> {
         self.settle().await?;
-        let depth = self.transaction_depth;
+        let depth = self.state.transaction_depth;
         if depth == 0 {
             return Ok(());
         }
 
-        self.in_flight = Some(if depth == 1 {
+        self.state.in_flight = Some(if depth == 1 {
             InFlight::End
         } else {
             InFlight::Savepoint
         });
         let result = self
+            .state
             .raw
             .execute(rollback_ansi_transaction_sql(depth).as_str())
             .await;
-        self.in_flight = None;
+        self.state.in_flight = None;
 
         match result {
             Ok(()) => {
-                self.transaction_depth -= 1;
+                self.state.transaction_depth -= 1;
                 Ok(())
             }
             Err(error) => {
-                if depth == 1 && self.raw.is_autocommit().unwrap_or(false) {
-                    self.transaction_depth = 0;
+                if depth == 1 && self.state.raw.is_autocommit().unwrap_or(false) {
+                    self.state.transaction_depth = 0;
                     return Ok(());
                 }
                 Err(error)
@@ -222,11 +231,12 @@ impl TursoConnection {
     }
 
     pub(crate) fn start_rollback_tx(&mut self) {
-        let depth = self.transaction_depth;
+        let depth = self.state.transaction_depth;
         if depth > 0 {
-            self.pending_rollbacks
+            self.state
+                .pending_rollbacks
                 .push(rollback_ansi_transaction_sql(depth));
-            self.transaction_depth -= 1;
+            self.state.transaction_depth -= 1;
         }
     }
 }
@@ -234,9 +244,9 @@ impl TursoConnection {
 impl Debug for TursoConnection {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("TursoConnection")
-            .field("options", &self.options)
-            .field("transaction_depth", &self.transaction_depth)
-            .field("cached_statements_size", &self.statements.len())
+            .field("options", &self.state.options)
+            .field("transaction_depth", &self.state.transaction_depth)
+            .field("cached_statements_size", &self.state.statements.len())
             .finish_non_exhaustive()
     }
 }
@@ -249,14 +259,14 @@ impl Connection for TursoConnection {
     async fn close(mut self) -> Result<(), Error> {
         // Best effort: don't leave a dangling transaction behind on a shared remote stream.
         let _ = self.settle().await;
-        if self.transaction_depth > 0 {
-            let _ = self.raw.execute("ROLLBACK").await;
+        if self.state.transaction_depth > 0 {
+            let _ = self.state.raw.execute("ROLLBACK").await;
         }
-        self.raw.close().await
+        self.state.raw.close().await
     }
 
     async fn close_hard(self) -> Result<(), Error> {
-        self.raw.close().await
+        self.state.raw.close().await
     }
 
     fn begin(
@@ -270,15 +280,15 @@ impl Connection for TursoConnection {
 
     async fn ping(&mut self) -> Result<(), Error> {
         self.settle().await?;
-        self.raw.execute("SELECT 1").await
+        self.state.raw.execute("SELECT 1").await
     }
 
     fn cached_statements_size(&self) -> usize {
-        self.statements.len()
+        self.state.statements.len()
     }
 
     async fn clear_cached_statements(&mut self) -> Result<(), Error> {
-        self.statements.clear();
+        self.state.statements.clear();
         Ok(())
     }
 
@@ -289,6 +299,6 @@ impl Connection for TursoConnection {
     }
 
     fn should_flush(&self) -> bool {
-        !self.pending_rollbacks.is_empty() || self.in_flight.is_some()
+        !self.state.pending_rollbacks.is_empty() || self.state.in_flight.is_some()
     }
 }

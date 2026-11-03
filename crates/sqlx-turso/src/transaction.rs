@@ -35,6 +35,6 @@ impl TransactionManager for TursoTransactionManager {
     }
 
     fn get_transaction_depth(conn: &TursoConnection) -> usize {
-        conn.transaction_depth
+        conn.state.transaction_depth
     }
 }

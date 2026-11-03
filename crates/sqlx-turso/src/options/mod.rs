@@ -699,7 +699,7 @@ impl ConnectOptions for TursoConnectOptions {
 
         // Built-in and user pragmas.
         for statement in self.connect_statements(&conn) {
-            conn.raw.execute(&statement).await.sqlx()?;
+            conn.state.raw.execute(&statement).await.sqlx()?;
         }
 
         Ok(conn)
@@ -718,7 +718,7 @@ impl ConnectOptions for TursoConnectOptions {
 
 impl TursoConnectOptions {
     fn connect_statements(&self, conn: &TursoConnection) -> Vec<String> {
-        let remote = conn.raw.is_remote();
+        let remote = conn.state.raw.is_remote();
         let mut statements = Vec::new();
 
         if self.concurrent_writes && !remote {

@@ -363,3 +363,11 @@ async fn concurrent_write_conflict_is_reported() {
         .unwrap();
     assert_eq!(v, 1);
 }
+
+#[test]
+fn connection_is_pointer_sized() {
+    assert_eq!(
+        std::mem::size_of::<TursoConnection>(),
+        std::mem::size_of::<usize>()
+    );
+}
