@@ -115,9 +115,8 @@ third-party drivers.
   `DbErr` instead of upstream's panics. Tests: sea-orm 10 Turso tests + 259 lib tests,
   migration Turso test + main suite with `DATABASE_URL=turso::memory:` all pass.
 - [ ] Phase 5 — done: sqlx SQLite suite ported (120 pass / 3 ignored), MVCC conflict test,
-  cloud serverless + sync tests written (env-gated, NOT yet run against Turso Cloud).
-  Pending: run cloud tests with real credentials; run sea-orm's full integration suite
-  against Turso (needs several GB of free disk).
+  cloud serverless + sync tests pass against Turso Cloud (libsql:// URL, 2026-11-03).
+  Pending: sea-orm's full integration suite against Turso (in progress).
 
 ## Implementation decisions (made during build)
 - Branches: root repo `sqlx-turso`; sea-orm fork `turso` (based on master, 18 commits past
@@ -140,7 +139,8 @@ third-party drivers.
 - Shared database handle lives in `TursoConnectOptions` (`Arc`); every builder method detaches
   it, so changed options open a fresh handle.
 - Remote connections: `PRAGMA foreign_keys` is only sent if set explicitly (embedded default
-  is ON, like sqlx-sqlite). Unverified against Turso Cloud.
+  is ON, like sqlx-sqlite). Verified 2026-11-03: Turso Cloud enforces FKs by default
+  (`PRAGMA foreign_keys` -> 1) and accepts the pragma.
 - SeaORM value binding (`sea_query::Value` -> `TursoArguments`) lives in the sea-orm fork, not
   sqlx-turso, because the set of `Value` variants depends on sea-query features that sea-orm
   forwards 1:1.
@@ -192,3 +192,6 @@ column layout); `PRAGMA foreign_keys` read/write (FKs enforced); multi-statement
    is absent, as in published sqlx-sqlite 0.9.0; `#[derive(sqlx::Type)]` on enums only emits
    impls for the built-in drivers, so third-party drivers need a hand-written `Type<Turso>`.
    Ported suite status: 120 pass, 3 ignored (gaps 4 and 5, plus `issue_1467` ignored upstream).
+7. **Turso Cloud prefixes error messages with `SQLite error: `** (e.g.
+   `SQLite error: UNIQUE constraint failed: t.x`); embedded errors have no prefix. Handled in
+   `TursoError::sqlite_code()` so `ErrorKind` / codes are the same on both transports.

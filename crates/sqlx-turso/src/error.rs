@@ -94,8 +94,10 @@ impl TursoError {
             TursoErrorKind::NotADatabase => SQLITE_NOTADB,
             TursoErrorKind::Corrupt => SQLITE_CORRUPT,
             TursoErrorKind::Constraint => {
-                // The engine reports constraint failures with SQLite's message text.
+                // The engine reports constraint failures with SQLite's message text; Turso
+                // Cloud prefixes it with "SQLite error: ".
                 let m = self.message.as_str();
+                let m = m.strip_prefix("SQLite error: ").unwrap_or(m);
                 if m.starts_with("UNIQUE constraint failed") {
                     SQLITE_CONSTRAINT_UNIQUE
                 } else if m.starts_with("PRIMARY KEY constraint failed") {
@@ -230,6 +232,40 @@ impl IntoSqlxError for turso_serverless::Error {
             E::ToSqlConversionFailure(e) => Error::Encode(e),
             E::BatchStatementFailed { error, .. } => error.into_sqlx(),
             other => Error::Protocol(other.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_embedded_and_cloud_constraint_messages() {
+        for prefix in ["", "SQLite error: "] {
+            let kind = |m: &str| {
+                TursoError::new(TursoErrorKind::Constraint, format!("{prefix}{m}")).kind()
+            };
+            assert_eq!(
+                kind("UNIQUE constraint failed: t.x"),
+                ErrorKind::UniqueViolation
+            );
+            assert_eq!(
+                kind("PRIMARY KEY constraint failed: t.id"),
+                ErrorKind::UniqueViolation
+            );
+            assert_eq!(
+                kind("FOREIGN KEY constraint failed"),
+                ErrorKind::ForeignKeyViolation
+            );
+            assert_eq!(
+                kind("NOT NULL constraint failed: t.y"),
+                ErrorKind::NotNullViolation
+            );
+            assert_eq!(
+                kind("CHECK constraint failed: z > 0"),
+                ErrorKind::CheckViolation
+            );
         }
     }
 }
