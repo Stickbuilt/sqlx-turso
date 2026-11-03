@@ -183,7 +183,7 @@ CREATE TABLE IF NOT EXISTS {table_name} (
                 // The `execution_time` however can only be measured for the whole transaction. This value _only_ exists for
                 // data lineage and debugging reasons, so it is not super important if it is lost. So we initialize it to -1
                 // and update it once the actual transaction completed.
-                let mut tx = self.begin().await?;
+                let mut tx = begin_migration(self).await?;
                 execute_migration(&mut tx, table_name, migration).await?;
                 tx.commit().await?;
             }
@@ -224,7 +224,7 @@ CREATE TABLE IF NOT EXISTS {table_name} (
             } else {
                 // Use a single transaction for the actual migration script and the essential bookkeeping so we never
                 // execute migrations twice. See https://github.com/launchbadge/sqlx/issues/1966.
-                let mut tx = self.begin().await?;
+                let mut tx = begin_migration(self).await?;
                 revert_migration(&mut tx, table_name, migration).await?;
                 tx.commit().await?;
             }
@@ -256,6 +256,24 @@ CREATE TABLE IF NOT EXISTS {table_name} (
 
             Ok(())
         })
+    }
+}
+
+/// Open the transaction a migration runs in. DDL is rejected inside `BEGIN CONCURRENT`
+/// (the default with `concurrent_writes(true)` and for `turso://` / `https://` URLs), so a
+/// top-level migration transaction always uses `BEGIN IMMEDIATE`. Inside a caller's
+/// transaction a savepoint is used, as with `begin()`.
+async fn begin_migration(
+    conn: &mut TursoConnection,
+) -> Result<sqlx_core::transaction::Transaction<'_, Turso>, Error> {
+    if conn.state.transaction_depth == 0 {
+        sqlx_core::transaction::Transaction::begin(
+            conn,
+            Some(sqlx_core::sql_str::SqlStr::from_static("BEGIN IMMEDIATE")),
+        )
+        .await
+    } else {
+        conn.begin().await
     }
 }
 
