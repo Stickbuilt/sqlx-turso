@@ -158,6 +158,13 @@ third-party drivers.
 - Testing: user will provide TURSO_DATABASE_URL / TURSO_AUTH_TOKEN and free disk; then run
   cloud tests and the full SeaORM integration suite against Turso.
 - sea-orm-sync and sea-orm-cli: no Turso support (out of scope unless requested).
+- Decimal/BigDecimal (2026-11-04): unchanged, identical to stock SeaORM on SQLite (stored as
+  REAL, approximate). For exact money values use integer minor units (e.g. cents).
+- Read-only / isolation-level requests: keep upstream's warning (not enforced).
+- Default SeaORM pool size for Turso: sqlx default (10), not 1 (shared handle; toasty doesn't
+  cap Turso pools either).
+- Remote (Turso Cloud): per-connection pragmas and explicit foreign_keys are rejected at
+  connect time; HTTP streams expire when idle and lose session state (PROTOCOL.md 4.2/4.5).
 
 ## Turso incompatibilities found
 Phase 0 verified working (MVCC on and off): INSERT/UPDATE/UPSERT `RETURNING`; `last_insert_rowid`;
