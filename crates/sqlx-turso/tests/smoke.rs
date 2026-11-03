@@ -320,3 +320,46 @@ async fn statement_describes_columns() {
 
 #[allow(dead_code)]
 fn assert_database(_: Turso) {}
+
+#[tokio::test]
+async fn concurrent_write_conflict_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = TursoConnectOptions::new()
+        .filename(dir.path().join("conflict.db"))
+        .create_if_missing(true)
+        .concurrent_writes(true);
+    let pool = TursoPoolOptions::new()
+        .max_connections(4)
+        .connect_with(opts)
+        .await
+        .unwrap();
+    pool.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER); INSERT INTO t VALUES (1, 0)")
+        .await
+        .unwrap();
+
+    let mut a = pool.begin().await.unwrap();
+    let mut b = pool.begin().await.unwrap();
+    a.execute("UPDATE t SET v = 1 WHERE id = 1").await.unwrap();
+    let b_write = b.execute("UPDATE t SET v = 2 WHERE id = 1").await;
+    a.commit().await.unwrap();
+
+    // The losing transaction fails either at its write or at commit.
+    let err = match b_write {
+        Err(err) => err,
+        Ok(_) => b.commit().await.unwrap_err(),
+    };
+    let db_err = err.as_database_error().expect("database error");
+    let turso_err = db_err
+        .try_downcast_ref::<sqlx_turso::TursoError>()
+        .expect("TursoError");
+    assert!(
+        turso_err.is_conflict(),
+        "not classified as conflict: {turso_err}"
+    );
+
+    let v: i64 = sqlx::query_scalar("SELECT v FROM t WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(v, 1);
+}
