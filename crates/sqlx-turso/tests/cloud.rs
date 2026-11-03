@@ -373,9 +373,27 @@ mod serverless {
 
         let result: anyhow::Result<()> = async {
             migrator.run(&mut conn).await?;
-            let row = sqlx::query(sqlx::AssertSqlSafe(format!("SELECT * FROM {t}")))
-                .fetch_one(&mut conn)
-                .await?;
+            // Right after DDL, Turso Cloud occasionally returns rows wider than the
+            // (stale) column metadata when other streams change the schema concurrently;
+            // the driver reports that as a retryable schema error.
+            let mut attempts = 0;
+            let row = loop {
+                attempts += 1;
+                match sqlx::query(sqlx::AssertSqlSafe(format!("SELECT * FROM {t}")))
+                    .fetch_one(&mut conn)
+                    .await
+                {
+                    Err(sqlx::Error::Database(e))
+                        if attempts < 5
+                            && e.try_downcast_ref::<sqlx_turso::TursoError>().is_some_and(
+                                |e| e.turso_kind() == sqlx_turso::TursoErrorKind::Schema,
+                            ) =>
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                    other => break other?,
+                }
+            };
             assert_eq!(row.len(), 3);
             migrator.undo(&mut conn, 0).await?;
             let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(

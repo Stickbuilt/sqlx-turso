@@ -91,7 +91,7 @@ impl AnyConn {
                         Error::Protocol("Turso Cloud returned no result for a statement".into())
                     })
                     .sqlx()?;
-                let columns = result
+                let columns: Vec<RawColumn> = result
                     .columns()
                     .iter()
                     .map(|c| RawColumn {
@@ -107,8 +107,11 @@ impl AnyConn {
                             .map(|i| row.get_value(i).map(serverless::from_value))
                             .collect::<Result<Vec<_>, _>>()
                     })
-                    .collect::<Result<Vec<_>, _>>()
+                    .collect::<Result<Vec<Vec<Value>>, _>>()
                     .sqlx()?;
+                if rows.iter().any(|row| row.len() != columns.len()) {
+                    return Err(schema_changed_error());
+                }
                 Ok(Cursor::Buffered {
                     columns,
                     rows: rows.into_iter(),
