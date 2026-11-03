@@ -116,7 +116,11 @@ third-party drivers.
   migration Turso test + main suite with `DATABASE_URL=turso::memory:` all pass.
 - [ ] Phase 5 — done: sqlx SQLite suite ported (120 pass / 3 ignored), MVCC conflict test,
   cloud serverless + sync tests pass against Turso Cloud (libsql:// URL, 2026-11-03).
-  Pending: sea-orm's full integration suite against Turso (in progress).
+  SeaORM's integration suite (`cargo test --test '*' --features
+  tests-features,sqlx-turso,runtime-tokio`, `DATABASE_URL=turso::memory:`) passes: 236 passed /
+  1 ignored across 65 test binaries, vs 226 / 1 with sqlx-sqlite (difference: `turso_tests`).
+  Harness changes: test macro and SQLite-dialect cfgs include `sqlx-turso`; one assertion
+  adjusted for gap 8.
 
 ## Implementation decisions (made during build)
 - Branches: root repo `sqlx-turso`; sea-orm fork `turso` (based on master, 18 commits past
@@ -195,3 +199,14 @@ column layout); `PRAGMA foreign_keys` read/write (FKs enforced); multi-statement
 7. **Turso Cloud prefixes error messages with `SQLite error: `** (e.g.
    `SQLite error: UNIQUE constraint failed: t.x`); embedded errors have no prefix. Handled in
    `TursoError::sqlite_code()` so `ErrorKind` / codes are the same on both transports.
+8. **No extended result code for primary-key violations:** after
+   `CREATE TABLE t(id INTEGER PRIMARY KEY); INSERT INTO t VALUES (1);`, a second
+   `INSERT INTO t VALUES (1);` fails in SQLite with `UNIQUE constraint failed: t.id` and extended
+   code 1555 (`SQLITE_CONSTRAINT_PRIMARYKEY`; same for `TEXT PRIMARY KEY`); a `UNIQUE` column
+   gives the same message with 2067. Turso (turso_core 0.8.3 `vdbe/execute.rs` halt) formats
+   both as `UNIQUE constraint failed: ...` and the API exposes only the primary code 19
+   (`turso::Error::Constraint(String)`), so sqlx-turso reports 2067 for both. `ErrorKind` is
+   `UniqueViolation` either way and SeaORM's `sql_err()` matches `"1555" | "2067"`, so only code
+   that compares the raw code to 1555 sees a difference. SeaORM `tests/crud/error.rs` expects
+   2067 under `sqlx-turso`. (Recovering 1555 would need a schema lookup in the error path; not
+   done.)
