@@ -12,7 +12,8 @@ use sqlx_core::logger::QueryLogger;
 use sqlx_core::sql_str::SqlStr;
 use sqlx_core::{Either, HashMap};
 
-use super::parse::ParsedQuery;
+use super::parse::{Parameter, ParsedQuery};
+use crate::arguments::argument_indexes;
 use crate::backend::RawColumn;
 use crate::type_info::DataType;
 use crate::{
@@ -44,6 +45,31 @@ pub(crate) fn columns_of(raw: &[RawColumn]) -> (Arc<Vec<TursoColumn>>, Arc<HashM
     }
 
     (Arc::new(columns), Arc::new(names))
+}
+
+/// Number of distinct arguments a query consumes, assigned across its statements the
+/// way [`TursoArguments::bind`] assigns them (e.g. `SELECT $1; SELECT $1` takes one).
+/// Named parameters, which can't be bound, count once per distinct name.
+fn distinct_arguments(parsed: &ParsedQuery) -> usize {
+    let mut indexes = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeSet::new();
+    let mut offset = 0;
+    for statement in &parsed.statements {
+        let mut unnamed = Vec::with_capacity(statement.parameters.len());
+        for parameter in &statement.parameters {
+            match parameter {
+                Parameter::Named(name) => {
+                    names.insert(name.clone());
+                }
+                other => unnamed.push(other.clone()),
+            }
+        }
+        if let Ok((slots, used)) = argument_indexes(&unnamed, offset) {
+            indexes.extend(slots);
+            offset += used;
+        }
+    }
+    indexes.len() + names.len()
 }
 
 impl TursoConnection {
@@ -84,10 +110,13 @@ impl TursoConnection {
                     None => vec![turso::Value::Null; statement.parameters.len()],
                 };
 
-                let mut cursor = self.state.raw.run(&statement.sql, params, persistent).await?;
+                self.check_not_aborted()?;
+                let mut cursor = self.raw_run(&statement.sql, params).await?;
+                // Column metadata is final only once the statement has been stepped.
+                let mut next = cursor.next().await?;
                 let (columns, column_names) = columns_of(cursor.columns());
 
-                while let Some(values) = cursor.next().await? {
+                while let Some(values) = next {
                     logger.increment_rows_returned();
                     rows_returned += 1;
                     r#yield!(Either::Right(TursoRow::new(values, &columns, &column_names)));
@@ -95,6 +124,7 @@ impl TursoConnection {
                     if limit.is_some_and(|limit| rows_returned >= limit) {
                         return Ok(());
                     }
+                    next = cursor.next().await?;
                 }
 
                 let (changes, last_insert_rowid) = cursor.outcome();
@@ -117,7 +147,7 @@ impl TursoConnection {
         let (raw_columns, parameters) = match parsed.statements.last() {
             Some(last) => (
                 self.state.raw.describe(&last.sql).await?,
-                parsed.statements.iter().map(|s| s.parameters.len()).sum(),
+                distinct_arguments(&parsed),
             ),
             None => (Vec::new(), 0),
         };
@@ -216,3 +246,21 @@ impl<'c> Executor<'c> for &'c mut TursoConnection {
 
 #[allow(unused_imports)]
 use Describe as _;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_distinct_arguments() {
+        let n = |sql| distinct_arguments(&ParsedQuery::parse(sql).unwrap());
+        assert_eq!(n("SELECT 1"), 0);
+        assert_eq!(n("SELECT ?, ?"), 2);
+        assert_eq!(n("SELECT $1; SELECT $1"), 1);
+        assert_eq!(n("SELECT ?1, ?1; SELECT ?1 + ?1"), 1);
+        assert_eq!(n("INSERT INTO t VALUES (?); SELECT ?"), 2);
+        assert_eq!(n("SELECT ?2; SELECT ?1"), 2);
+        assert_eq!(n("SELECT ?3"), 3);
+        assert_eq!(n("SELECT :a, :a; SELECT :a"), 1);
+    }
+}

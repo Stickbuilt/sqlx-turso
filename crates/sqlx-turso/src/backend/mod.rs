@@ -56,42 +56,25 @@ impl AnyConn {
         }
     }
 
-    /// Execute a statement that returns no rows of interest.
-    pub(crate) async fn execute(&self, sql: &str) -> Result<(), Error> {
-        let mut cursor = self.run(sql, Vec::new(), false).await.sqlx()?;
-        while cursor.next().await.sqlx()?.is_some() {}
-        Ok(())
-    }
-
-    /// Run one statement. With `cached`, the embedded engine reuses a prepared statement
-    /// for the same SQL text.
-    pub(crate) async fn run(
-        &self,
-        sql: &str,
-        params: Vec<Value>,
-        cached: bool,
-    ) -> Result<Cursor, Error> {
+    /// Run one statement.
+    ///
+    /// Embedded statements are always freshly prepared: turso's own statement cache
+    /// (`Connection::prepare_cached`) is unbounded and never invalidated, and a cached
+    /// program recompiled after a schema change reports stale column metadata. Preparing
+    /// adopts the connection's current schema, and [`Cursor::columns`] is re-read after
+    /// the first step in case the engine still recompiled the statement.
+    pub(crate) async fn run(&self, sql: &str, params: Vec<Value>) -> Result<Cursor, Error> {
         match self {
             Self::Embedded(conn) => {
-                let mut stmt = if cached {
-                    conn.prepare_cached(sql).await.sqlx()?
-                } else {
-                    conn.prepare(sql).await.sqlx()?
-                };
-                let columns = stmt
-                    .columns()
-                    .into_iter()
-                    .map(|c| RawColumn {
-                        name: c.name().to_string(),
-                        decl_type: c.decl_type().map(str::to_string),
-                    })
-                    .collect();
+                let mut stmt = conn.prepare(sql).await.sqlx()?;
+                let columns = raw_columns(&stmt);
                 let rows = stmt.query(params).await.sqlx()?;
                 Ok(Cursor::Embedded {
                     conn: conn.clone(),
                     stmt,
                     rows: Some(rows),
                     columns,
+                    stepped: false,
                 })
             }
             #[cfg(feature = "serverless")]
@@ -141,17 +124,7 @@ impl AnyConn {
     /// Column metadata of a statement, without executing it.
     pub(crate) async fn describe(&self, sql: &str) -> Result<Vec<RawColumn>, Error> {
         let columns = match self {
-            Self::Embedded(conn) => conn
-                .prepare(sql)
-                .await
-                .sqlx()?
-                .columns()
-                .into_iter()
-                .map(|c| RawColumn {
-                    name: c.name().to_string(),
-                    decl_type: c.decl_type().map(str::to_string),
-                })
-                .collect(),
+            Self::Embedded(conn) => raw_columns(&conn.prepare(sql).await.sqlx()?),
             #[cfg(feature = "serverless")]
             Self::Serverless(conn) => conn
                 .prepare(sql)
@@ -195,6 +168,24 @@ impl AnyConn {
     }
 }
 
+fn raw_columns(stmt: &turso::Statement) -> Vec<RawColumn> {
+    stmt.columns()
+        .into_iter()
+        .map(|c| RawColumn {
+            name: c.name().to_string(),
+            decl_type: c.decl_type().map(str::to_string),
+        })
+        .collect()
+}
+
+fn schema_changed_error() -> Error {
+    Error::Database(Box::new(crate::TursoError::new(
+        crate::TursoErrorKind::Schema,
+        "the database schema changed while the statement was starting and its result \
+         columns no longer match; run the statement again",
+    )))
+}
+
 /// The rows and outcome of one statement.
 pub(crate) enum Cursor {
     Embedded {
@@ -202,6 +193,9 @@ pub(crate) enum Cursor {
         stmt: turso::Statement,
         rows: Option<turso::Rows>,
         columns: Vec<RawColumn>,
+        /// Whether the statement has been stepped; the engine recompiles a statement
+        /// whose schema is stale on its first step, so `columns` is refreshed then.
+        stepped: bool,
     },
     #[cfg_attr(not(feature = "serverless"), allow(dead_code))]
     Buffered {
@@ -213,6 +207,8 @@ pub(crate) enum Cursor {
 }
 
 impl Cursor {
+    /// Result column metadata. For embedded statements this is only final after the
+    /// first call to [`Cursor::next`].
     pub(crate) fn columns(&self) -> &[RawColumn] {
         match self {
             Self::Embedded { columns, .. } | Self::Buffered { columns, .. } => columns,
@@ -221,11 +217,40 @@ impl Cursor {
 
     pub(crate) async fn next(&mut self) -> Result<Option<Vec<Value>>, Error> {
         match self {
-            Self::Embedded { rows, .. } => {
+            Self::Embedded {
+                stmt,
+                rows,
+                columns,
+                stepped,
+                ..
+            } => {
                 let Some(cursor) = rows.as_mut() else {
                     return Ok(None);
                 };
-                match cursor.next().await.sqlx()? {
+                let result = cursor.next().await;
+                if !*stepped {
+                    *stepped = true;
+                    // The first step may have recompiled the statement (schema change
+                    // since it was prepared); the row was then built from the new
+                    // program, so take the column metadata from it too.
+                    let previous = columns.len();
+                    *columns = raw_columns(stmt);
+                    match &result {
+                        // turso sizes the first row by the column count read before the
+                        // step; if the recompiled statement has a different number of
+                        // columns, the row is truncated or failed to build.
+                        Ok(Some(row)) if row.column_count() != columns.len() => {
+                            rows.take();
+                            return Err(schema_changed_error());
+                        }
+                        Err(_) if previous != columns.len() => {
+                            rows.take();
+                            return Err(schema_changed_error());
+                        }
+                        _ => {}
+                    }
+                }
+                match result.sqlx()? {
                     Some(row) => {
                         let values = (0..row.column_count())
                             .map(|i| row.get_value(i))

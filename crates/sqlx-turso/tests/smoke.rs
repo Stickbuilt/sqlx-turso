@@ -183,10 +183,21 @@ async fn nested_transactions_and_drop_rollback() {
     assert_eq!(xs, [1, 3]);
     assert!(!conn.is_in_transaction());
 
-    // A custom BEGIN is only allowed at the top level.
+    // A custom BEGIN is only allowed at the top level; the failed nested begin must leave
+    // the outer transaction open and its data intact.
     let mut tx = conn.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    tx.execute("INSERT INTO t VALUES (6)").await.unwrap();
     assert!(tx.begin_with("BEGIN").await.is_err());
-    tx.rollback().await.unwrap();
+    assert!(tx.is_in_transaction());
+    tx.execute("INSERT INTO t VALUES (7)").await.unwrap();
+    tx.commit().await.unwrap();
+
+    let xs: Vec<i64> = sqlx::query_scalar("SELECT x FROM t ORDER BY x")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(xs, [1, 3, 6, 7]);
+    assert!(!conn.is_in_transaction());
 }
 
 #[tokio::test]

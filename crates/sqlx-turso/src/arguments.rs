@@ -69,33 +69,45 @@ impl TursoArguments {
         parameters: &[Parameter],
         offset: usize,
     ) -> Result<(Vec<turso::Value>, usize), Error> {
-        let mut arg_i = offset;
-        let mut values = Vec::with_capacity(parameters.len());
-
-        for parameter in parameters {
-            let n = match parameter {
-                Parameter::Anonymous => {
-                    arg_i += 1;
-                    arg_i
-                }
-                Parameter::Numbered(n) => *n,
-                Parameter::Named(name) => {
-                    return Err(sqlx_core::err_protocol!(
-                        "parameters with non-integer names are not currently supported: {}",
-                        name
-                    ));
-                }
-            };
-
-            values.push(match self.values.0.get(n.wrapping_sub(1)) {
+        let (indexes, used) = argument_indexes(parameters, offset)?;
+        let values = indexes
+            .into_iter()
+            .map(|n| match self.values.0.get(n.wrapping_sub(1)) {
                 Some(value) => value.to_turso(),
                 // SQLite treats unbound parameters as NULL; reproduce that.
                 None => turso::Value::Null,
-            });
-        }
-
-        Ok((values, arg_i - offset))
+            })
+            .collect();
+        Ok((values, used))
     }
+}
+
+/// The 1-based argument bound to each parameter slot of one statement, and the number
+/// of anonymous arguments the statement consumes (see [`TursoArguments::bind`]).
+pub(crate) fn argument_indexes(
+    parameters: &[Parameter],
+    offset: usize,
+) -> Result<(Vec<usize>, usize), Error> {
+    let mut arg_i = offset;
+    let mut indexes = Vec::with_capacity(parameters.len());
+
+    for parameter in parameters {
+        indexes.push(match parameter {
+            Parameter::Anonymous => {
+                arg_i += 1;
+                arg_i
+            }
+            Parameter::Numbered(n) => *n,
+            Parameter::Named(name) => {
+                return Err(sqlx_core::err_protocol!(
+                    "parameters with non-integer names are not currently supported: {}",
+                    name
+                ));
+            }
+        });
+    }
+
+    Ok((indexes, arg_i - offset))
 }
 
 impl Arguments for TursoArguments {

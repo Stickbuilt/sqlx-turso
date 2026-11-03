@@ -201,6 +201,10 @@ impl TursoConnectOptions {
     /// Connect to a Turso Cloud database over HTTP (requires the `serverless` feature at
     /// connect time). `libsql://` URLs default to `BEGIN` transactions; `turso://`,
     /// `https://` and `http://` URLs default to `BEGIN CONCURRENT`.
+    ///
+    /// The URL is validated when connecting: it must be a `libsql://`, `turso://`,
+    /// `https://` or `http://` URL with a host and no query string (pass the token with
+    /// [`auth_token`](Self::auth_token)).
     pub fn remote(mut self, url: impl Into<String>) -> Self {
         let url = url.into();
         let libsql = url.starts_with("libsql:");
@@ -222,8 +226,12 @@ impl TursoConnectOptions {
 
     /// Enforce foreign key constraints (`PRAGMA foreign_keys`).
     ///
-    /// Embedded databases enable this by default, as sqlx-sqlite does. Remote databases
-    /// leave the server's setting alone unless this is called.
+    /// Embedded databases enable this by default, as sqlx-sqlite does.
+    ///
+    /// Not supported for remote (Turso Cloud) databases: connecting fails with a
+    /// configuration error if this is set. Per-connection `PRAGMA` state lives on the
+    /// server-side HTTP stream, which expires when idle, so the setting would silently
+    /// revert to the server default. Turso Cloud enforces foreign keys by default.
     pub fn foreign_keys(mut self, on: bool) -> Self {
         self.foreign_keys = Some(on);
         self.changed()
@@ -231,6 +239,9 @@ impl TursoConnectOptions {
 
     /// How long an embedded connection waits for a lock before failing with a busy
     /// error (default: 5 seconds).
+    ///
+    /// Has no effect on remote (Turso Cloud) connections, where the server decides how
+    /// long to wait.
     pub fn busy_timeout(mut self, timeout: Duration) -> Self {
         self.busy_timeout = timeout;
         self.changed()
@@ -246,6 +257,11 @@ impl TursoConnectOptions {
     ///
     /// Remote databases already default to `BEGIN CONCURRENT` (except `libsql://` URLs),
     /// so this only affects embedded connections.
+    ///
+    /// DDL (`CREATE`, `ALTER`, `DROP`, ...) is rejected inside a `BEGIN CONCURRENT`
+    /// transaction ("DDL statements require an exclusive transaction"); open such
+    /// transactions with `Connection::begin_with("BEGIN")` (or `BEGIN IMMEDIATE`).
+    /// Migrations do this automatically.
     pub fn concurrent_writes(mut self, on: bool) -> Self {
         self.concurrent_writes = on;
         self.changed()
@@ -255,12 +271,19 @@ impl TursoConnectOptions {
     /// default (`BEGIN`, or `BEGIN CONCURRENT` with [concurrent writes](Self::concurrent_writes)
     /// and for non-`libsql://` remote databases). A single transaction can still choose its
     /// own statement with `Connection::begin_with`.
+    ///
+    /// [`Concurrent`](TursoTransactionMode::Concurrent) transactions cannot run DDL;
+    /// see [`concurrent_writes`](Self::concurrent_writes).
     pub fn transaction_mode(mut self, mode: TursoTransactionMode) -> Self {
         self.transaction_mode = Some(mode);
         self.changed()
     }
 
     /// Set a `PRAGMA` executed on every new connection, after the built-in ones.
+    ///
+    /// Embedded databases only: connecting to a remote (Turso Cloud) database fails with
+    /// a configuration error if any pragma is set, because per-connection `PRAGMA` state
+    /// lives on the server-side HTTP stream and silently reverts when the stream expires.
     pub fn pragma(
         mut self,
         key: impl Into<Cow<'static, str>>,
@@ -270,7 +293,12 @@ impl TursoConnectOptions {
         self.changed()
     }
 
-    /// Number of prepared statements cached per connection (default: 100).
+    /// Number of parsed query strings cached per connection (default: 100).
+    ///
+    /// The cache holds the driver's statement splitting and parameter numbering. Engine
+    /// statements are prepared on every execution so they always reflect the current
+    /// schema (turso's own statement cache is unbounded and isn't invalidated by schema
+    /// changes).
     pub fn statement_cache_capacity(mut self, capacity: usize) -> Self {
         self.statement_cache_capacity = capacity;
         self.changed()
@@ -695,11 +723,21 @@ impl ConnectOptions for TursoConnectOptions {
     }
 
     async fn connect(&self) -> Result<Self::Connection, Error> {
-        let conn = TursoConnection::establish(self).await.sqlx()?;
+        if let Target::Remote { url, .. } = &self.target {
+            self.validate_remote(url)?;
+        }
 
-        // Built-in and user pragmas.
-        for statement in self.connect_statements(&conn) {
-            conn.state.raw.execute(&statement).await.sqlx()?;
+        let mut conn = TursoConnection::establish(self).await.sqlx()?;
+
+        if conn.is_remote() {
+            // Opening a remote connection does no I/O; make a round trip so a bad URL or
+            // token fails here rather than on first use.
+            conn.raw_execute("SELECT 1").await?;
+        } else {
+            // Built-in and user pragmas.
+            for statement in self.connect_statements() {
+                conn.raw_execute(&statement).await?;
+            }
         }
 
         Ok(conn)
@@ -717,25 +755,62 @@ impl ConnectOptions for TursoConnectOptions {
 }
 
 impl TursoConnectOptions {
-    fn connect_statements(&self, conn: &TursoConnection) -> Vec<String> {
-        let remote = conn.state.raw.is_remote();
+    /// Pragmas run on every new embedded connection.
+    fn connect_statements(&self) -> Vec<String> {
         let mut statements = Vec::new();
 
-        if self.concurrent_writes && !remote {
+        if self.concurrent_writes {
             statements.push("PRAGMA journal_mode = 'mvcc'".to_string());
         }
-        match self.foreign_keys {
-            Some(on) => statements.push(format!(
-                "PRAGMA foreign_keys = {}",
-                if on { "ON" } else { "OFF" }
-            )),
-            None if !remote => statements.push("PRAGMA foreign_keys = ON".to_string()),
-            None => {}
-        }
+        let foreign_keys = self.foreign_keys.unwrap_or(true);
+        statements.push(format!(
+            "PRAGMA foreign_keys = {}",
+            if foreign_keys { "ON" } else { "OFF" }
+        ));
         for (key, value) in &self.pragmas {
             statements.push(format!("PRAGMA {key} = {value}"));
         }
 
         statements
+    }
+
+    /// Reject remote configurations that can't work: malformed URLs and per-connection
+    /// settings that would silently revert when the HTTP stream expires.
+    fn validate_remote(&self, url: &str) -> Result<(), Error> {
+        let parsed = Url::parse(url).map_err(|e| {
+            Error::Configuration(format!("invalid Turso Cloud URL {url:?}: {e}").into())
+        })?;
+        if !matches!(parsed.scheme(), "libsql" | "turso" | "https" | "http") {
+            return Err(Error::Configuration(
+                format!(
+                    "invalid Turso Cloud URL {url:?}: the scheme must be libsql, turso, https \
+                     or http"
+                )
+                .into(),
+            ));
+        }
+        if parsed.host_str().is_none_or(str::is_empty) {
+            return Err(Error::Configuration(
+                format!("invalid Turso Cloud URL {url:?}: no host").into(),
+            ));
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(Error::Configuration(
+                "invalid Turso Cloud URL: query strings and fragments are not supported by \
+                 TursoConnectOptions::remote(); pass the token with auth_token()"
+                    .into(),
+            ));
+        }
+
+        if self.foreign_keys.is_some() || !self.pragmas.is_empty() {
+            return Err(Error::Configuration(
+                "foreign_keys() and pragma() are not supported for Turso Cloud connections: \
+                 per-connection PRAGMA state lives on the server's HTTP stream, which expires \
+                 when idle, so the setting would silently revert to the server default \
+                 (Turso Cloud enforces foreign keys by default)"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 }
