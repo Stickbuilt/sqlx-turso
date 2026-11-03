@@ -142,9 +142,20 @@ third-party drivers.
   operation marks the connection broken so the pool discards it.
 - Shared database handle lives in `TursoConnectOptions` (`Arc`); every builder method detaches
   it, so changed options open a fresh handle.
-- Remote connections: `PRAGMA foreign_keys` is only sent if set explicitly (embedded default
-  is ON, like sqlx-sqlite). Verified 2026-11-03: Turso Cloud enforces FKs by default
-  (`PRAGMA foreign_keys` -> 1) and accepts the pragma.
+- Remote connections never send pragmas; `pragma(..)` / explicit `foreign_keys(..)` on a remote
+  target is a connect-time error (2026-11-04). Turso Cloud enforces FKs by default
+  (`PRAGMA foreign_keys` -> 1, verified 2026-11-03).
+- Transactions default to `BEGIN` everywhere (embedded and remote); `concurrent_writes(true)`
+  is the single opt-in to `BEGIN CONCURRENT` (88675da). Migrations always use `BEGIN IMMEDIATE`.
+- No engine statement reuse: every statement is prepared fresh, because turso's statement cache
+  returned stale columns after schema changes and can't be invalidated. Measured cost ~5-6 us per
+  query on in-memory embedded (1-2.6 us cached vs 6.4-8.6 us); revisit with a schema-aware cache
+  if embedded hot paths need it.
+- Column metadata is read after the first step; a row whose width doesn't match its columns is
+  a retryable `TursoErrorKind::Schema` error (code 17). Statements while the engine has aborted
+  the transaction fail with `TursoErrorKind::Aborted` (code 516). Write conflicts report 517.
+- Review fixes 2026-11-04: sqlx-turso c98f4df..88675da; sea-orm 77789385..c6e6abbc; sea-schema
+  d3dfaf5, 842c564.
 - SeaORM value binding (`sea_query::Value` -> `TursoArguments`) lives in the sea-orm fork, not
   sqlx-turso, because the set of `Value` variants depends on sea-query features that sea-orm
   forwards 1:1.
@@ -182,7 +193,8 @@ column layout); `PRAGMA foreign_keys` read/write (FKs enforced); multi-statement
    would list them; sea-orm-migration `fresh`/`reset` would try to DROP them (toasty notes they
    cannot be dropped). Fix in forks: also exclude `name NOT LIKE '\_\_turso\_%' ESCAPE '\'`
    (toasty's filter) in sea-schema probes/discovery and migration drop_everything.
-   **Done** in sea-schema (discovery + `query_tables` probe).
+   **Done** in sea-schema: filter narrowed to `__turso\_internal\_%` (842c564) so user tables
+   such as `__turso_cache` stay visible; applied in table listing and index discovery.
 2. **`changes` after DDL is non-zero:** DROP TABLE -> 2; under MVCC ALTER ADD COLUMN -> 1,
    RENAME -> 6, CREATE TRIGGER -> 1 (internal schema writes counted). Affects
    `rows_affected()` for DDL only. Decide in Phase 2 whether to normalise (compare with
@@ -217,3 +229,14 @@ column layout); `PRAGMA foreign_keys` read/write (FKs enforced); multi-statement
    that compares the raw code to 1555 sees a difference. SeaORM `tests/crud/error.rs` expects
    2067 under `sqlx-turso`. (Recovering 1555 would need a schema lookup in the error path; not
    done.)
+9. **Identifiers are stored lowercased:** `CREATE TABLE "CakeOrder"` appears as `cakeorder` in
+   `sqlite_master` (also index names, `tbl_name`, FK target tables, the referenced `to` column in
+   `PRAGMA foreign_key_list`, and columns of automatic UNIQUE indexes in `PRAGMA index_info`).
+   Ordinary column names keep their case. SQLite keeps the original case. Handled: sea-schema and
+   sea-orm schema sync compare SQLite identifiers case-insensitively.
+10. **`BEGIN CONCURRENT` needs MVCC:** embedded without `journal_mode = 'mvcc'` fails with
+    "Concurrent transaction mode is only supported when MVCC is enabled"; Turso Cloud databases
+    without concurrent writes enabled reject it as a syntax error. Hence BEGIN is the default.
+11. **Turso Cloud can return stale column metadata right after a schema change** (rows have the
+    new width, columns the old list; ~1 in 6 runs under parallel DDL). The driver rejects such
+    results with the retryable `Schema` error.
