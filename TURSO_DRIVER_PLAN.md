@@ -114,7 +114,7 @@ third-party drivers.
   `map_sqlx_turso_opts`/`_pool_opts`/`_before_acquire` hooks; bind errors propagate as
   `DbErr` instead of upstream's panics. Tests: sea-orm 10 Turso tests + 259 lib tests,
   migration Turso test + main suite with `DATABASE_URL=turso::memory:` all pass.
-- [ ] Phase 5 — done: sqlx SQLite suite ported (120 pass / 3 ignored), MVCC conflict test,
+- [x] Phase 5 — done: sqlx SQLite suite ported (120 pass / 3 ignored), MVCC conflict test,
   cloud serverless + sync tests pass against Turso Cloud (libsql:// URL, 2026-11-03).
   SeaORM's integration suite (`cargo test --test '*' --features
   tests-features,sqlx-turso,runtime-tokio`, `DATABASE_URL=turso::memory:`) passes: 236 passed /
