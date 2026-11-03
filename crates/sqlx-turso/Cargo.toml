@@ -10,10 +10,10 @@ publish = false
 [features]
 default = ["any", "migrate", "json"]
 any = ["sqlx-core/any"]
-json = ["sqlx-core/json"]
-# `sqlx-core/offline` is always enabled: it adds a required `describe()` method to the
-# driver traits, and any crate in the graph may switch it on (e.g. the `sqlx` macros).
-offline = []
+json = ["sqlx-core/json", "dep:serde"]
+# Must be enabled whenever `sqlx-core/offline` is (e.g. by the `sqlx` crate's default
+# `macros` feature), like the `offline` feature of every SQLx driver.
+offline = ["sqlx-core/offline", "dep:serde"]
 migrate = ["sqlx-core/migrate"]
 
 chrono = ["dep:chrono", "sqlx-core/chrono"]
@@ -30,7 +30,7 @@ bigdecimal = []
 rust_decimal = []
 
 [dependencies]
-sqlx-core = { workspace = true, features = ["offline"] }
+sqlx-core.workspace = true
 turso.workspace = true
 turso_parser.workspace = true
 turso_serverless = { workspace = true, optional = true }
@@ -46,10 +46,16 @@ thiserror = "2.0"
 chrono = { version = "0.4.34", default-features = false, features = ["std", "clock"], optional = true }
 time = { version = "0.3.37", features = ["formatting", "parsing", "macros"], optional = true }
 uuid = { version = "1.1.2", optional = true }
-serde = { version = "1.0.219", features = ["derive"] }
+serde = { version = "1.0.219", features = ["derive"], optional = true }
 
 [dev-dependencies]
-sqlx = { workspace = true, features = ["runtime-tokio", "macros", "derive"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "derive"] }
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"
 sqlx-core.workspace = true
+anyhow = "1.0.58"
+futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
+paste = "1.0.6"
+serde_json = "1.0.142"
+hex = "0.4.3"
+rand = { version = "0.10.1", features = ["thread_rng"], default-features = false }

@@ -103,11 +103,41 @@ third-party drivers.
 ## Progress
 - [x] Phase 0 — done 2026-11-03 (turso 0.8.3, local engine, MVCC on/off). Spike code (throwaway):
   scratchpad `phase0/`. Everything required works; gaps below.
-- [ ] Phase 1
-- [ ] Phase 2
-- [ ] Phase 3
-- [ ] Phase 4
-- [ ] Phase 5
+- [x] Phase 1 — `backend` module (local / sync / serverless engines, error mapping, MVCC pragma).
+- [x] Phase 2 — sqlx `Database` impl, ported types/migrate/any/type_checking; smoke tests pass.
+  Multi-statement splitting via `turso_parser` worked (no fallback needed).
+- [x] Phase 3 — `push`/`pull`/`checkpoint`/`sync_stats` on `TursoConnectOptions`
+  (`pool.connect_options().push()`), `auth_token_fn`, per-transaction mode via `begin_with`.
+- [ ] Phase 4 — sea-schema fork done (branch `turso`, commit 4a480f6); SeaORM fork in progress.
+- [ ] Phase 5 — porting sqlx's SQLite test suite in progress; SeaORM suite, cloud and sync
+  tests pending.
+
+## Implementation decisions (made during build)
+- Branches: root repo `sqlx-turso`; sea-orm fork `turso` (based on master, 18 commits past
+  2.0.4, published deps only); sea-schema fork `turso` (based on tag 0.18.1).
+- sqlx-turso default features: `any`, `migrate`, `json`. `sync` and `serverless` are opt-in
+  cargo features (like toasty); the engine is chosen at runtime from the options.
+- `offline` is opt-in, like every SQLx driver: it must be enabled whenever `sqlx-core/offline`
+  is (e.g. an app using `sqlx` with default features, whose `macros` feature switches it on).
+  Forcing it on was tried and reverted: it breaks sqlx-sqlite/mysql/postgres in the same build.
+- `rows_affected()` uses the statement's own change count (`Statement::n_change()`), not the
+  connection-wide `sqlite3_changes()` that sqlx-sqlite reports (which is stale for SELECT/DDL).
+  Resolves gap 2: DDL reports the engine's internal writes; SELECT reports 0.
+- Errors: `TursoError::code()` returns SQLite extended result codes (2067, 1555, 787, 1299,
+  275, ...) derived from the engine's error class + message, so sqlx `ErrorKind` and SeaORM's
+  `sql_err()` behave as with sqlx-sqlite. Resolves gap 3. `TursoError::is_conflict()` for MVCC
+  retry loops.
+- `Drop`-time rollbacks are queued and executed before the next operation; cancelled
+  BEGIN/COMMIT futures are reconciled with the engine's autocommit flag; a cancelled savepoint
+  operation marks the connection broken so the pool discards it.
+- Shared database handle lives in `TursoConnectOptions` (`Arc`); every builder method detaches
+  it, so changed options open a fresh handle.
+- Remote connections: `PRAGMA foreign_keys` is only sent if set explicitly (embedded default
+  is ON, like sqlx-sqlite). Unverified against Turso Cloud.
+- SeaORM value binding (`sea_query::Value` -> `TursoArguments`) lives in the sea-orm fork, not
+  sqlx-turso, because the set of `Value` variants depends on sea-query features that sea-orm
+  forwards 1:1.
+- sea-schema: `sqlx-turso` feature enables `sea-query/thread-safe` (as sea-query-sqlx does).
 
 ## Turso incompatibilities found
 Phase 0 verified working (MVCC on and off): INSERT/UPDATE/UPSERT `RETURNING`; `last_insert_rowid`;
@@ -125,9 +155,24 @@ column layout); `PRAGMA foreign_keys` read/write (FKs enforced); multi-statement
    would list them; sea-orm-migration `fresh`/`reset` would try to DROP them (toasty notes they
    cannot be dropped). Fix in forks: also exclude `name NOT LIKE '\_\_turso\_%' ESCAPE '\'`
    (toasty's filter) in sea-schema probes/discovery and migration drop_everything.
+   **Done** in sea-schema (discovery + `query_tables` probe).
 2. **`changes` after DDL is non-zero:** DROP TABLE -> 2; under MVCC ALTER ADD COLUMN -> 1,
    RENAME -> 6, CREATE TRIGGER -> 1 (internal schema writes counted). Affects
    `rows_affected()` for DDL only. Decide in Phase 2 whether to normalise (compare with
    sqlx-sqlite semantics).
 3. **Error classification:** need to check whether `turso::Error` exposes extended codes or
    only message text (toasty's `error.rs` is the reference) — Phase 1.
+4. **`VACUUM` is gated behind an experimental flag:** `VACUUM` fails with
+   `Parse error: VACUUM is an experimental feature. Enable with --experimental-vacuum flag`
+   (code 1) unless the database is opened with `experimental_vacuum(true)`; SQLite always
+   accepts it. With the flag the statement succeeds. Ported test `migrate::no_tx` (a
+   `-- no-transaction` migration containing `VACUUM;`) is ignored.
+5. **Journal mode is fixed to WAL:** on a file database `PRAGMA journal_mode = DELETE` is
+   accepted but returns `wal` and the mode stays `wal` (`PRAGMA journal_mode` -> `wal`); SQLite
+   switches to `delete`. Ported test `migrate::no_tx_reversible` (up: `JOURNAL_MODE = WAL`,
+   down: `JOURNAL_MODE = DELETE`, asserts `delete` after undo) is ignored.
+6. **Driver parity notes (not engine gaps):** `turso:` with an empty path opens an in-memory
+   database (sqlx-sqlite's `sqlite:` opens a temporary on-disk file); `[u8; N]` encode/decode
+   is absent, as in published sqlx-sqlite 0.9.0; `#[derive(sqlx::Type)]` on enums only emits
+   impls for the built-in drivers, so third-party drivers need a hand-written `Type<Turso>`.
+   Ported suite status: 120 pass, 3 ignored (gaps 4 and 5, plus `issue_1467` ignored upstream).
