@@ -224,4 +224,3 @@ fn map_arguments(args: AnyArguments) -> TursoArguments {
         values: TursoArgumentsBuffer::new(values),
     }
 }
-

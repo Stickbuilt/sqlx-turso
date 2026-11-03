@@ -9,9 +9,7 @@
 use futures_util::TryStreamExt;
 use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus};
 use sqlx::SqlSafeStr;
-use sqlx::{
-    Column, ConnectOptions, Connection, Executor, Row, Statement, TypeInfo, query,
-};
+use sqlx::{Column, ConnectOptions, Connection, Executor, Row, Statement, TypeInfo, query};
 use sqlx_turso::{
     Turso, TursoConnectOptions, TursoConnection, TursoPool, TursoPoolOptions, TursoRow,
 };
@@ -583,10 +581,7 @@ async fn row_dropped_after_connection_doesnt_panic() {
 #[tokio::test]
 #[ignore]
 async fn issue_1467() -> anyhow::Result<()> {
-    let mut conn = TursoConnectOptions::new()
-        .in_memory()
-        .connect()
-        .await?;
+    let mut conn = TursoConnectOptions::new().in_memory().connect().await?;
 
     sqlx::query(
         r#"
