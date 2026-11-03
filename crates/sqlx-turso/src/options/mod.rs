@@ -455,6 +455,44 @@ impl TursoConnectOptions {
         Ok(db)
     }
 
+    #[cfg(feature = "sync")]
+    async fn sync_database(&self) -> Result<turso::sync::Database, Error> {
+        match self.database().await? {
+            AnyDatabase::Sync(db) => Ok(db),
+            _ => Err(Error::Configuration(
+                "the connection is not configured for sync; set sync_url() or sync(true)".into(),
+            )),
+        }
+    }
+
+    /// Push local changes to Turso Cloud.
+    ///
+    /// Works on the database handle shared by every connection created from these
+    /// options (e.g. `pool.connect_options().push()`).
+    #[cfg(feature = "sync")]
+    pub async fn push(&self) -> Result<(), Error> {
+        self.sync_database().await?.push().await.sqlx()
+    }
+
+    /// Pull remote changes and apply them locally. Returns `true` when changes were
+    /// applied, `false` when the remote had nothing new.
+    #[cfg(feature = "sync")]
+    pub async fn pull(&self) -> Result<bool, Error> {
+        self.sync_database().await?.pull().await.sqlx()
+    }
+
+    /// Force a WAL checkpoint of the synced database.
+    #[cfg(feature = "sync")]
+    pub async fn checkpoint(&self) -> Result<(), Error> {
+        self.sync_database().await?.checkpoint().await.sqlx()
+    }
+
+    /// Sync statistics of the synced database.
+    #[cfg(feature = "sync")]
+    pub async fn sync_stats(&self) -> Result<turso::sync::DatabaseSyncStats, Error> {
+        self.sync_database().await?.stats().await.sqlx()
+    }
+
     async fn open(&self) -> Result<AnyDatabase, Error> {
         let path = match &self.target {
             Target::Remote { url, .. } => return self.open_remote(url).await,

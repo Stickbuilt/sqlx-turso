@@ -15,6 +15,8 @@ pub use error::{TursoError, TursoErrorKind};
 pub use options::{AuthTokenFuture, EncryptionOpts, TursoConnectOptions, TursoTransactionMode};
 #[cfg(feature = "sync")]
 pub use options::{PartialBootstrapStrategy, PartialSyncOpts, RemoteEncryptionCipher};
+#[cfg(feature = "sync")]
+pub use turso::sync::DatabaseSyncStats;
 pub use query_result::TursoQueryResult;
 pub use row::TursoRow;
 pub use statement::TursoStatement;
