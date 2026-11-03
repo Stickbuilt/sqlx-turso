@@ -28,7 +28,10 @@ fn unique(prefix: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    format!("{prefix}_{}_{nanos}", std::process::id())
+    // The counter keeps names unique even when the clock doesn't (macOS: microseconds).
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{prefix}_{}_{nanos}_{n}", std::process::id())
 }
 
 #[cfg(feature = "serverless")]
