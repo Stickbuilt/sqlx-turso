@@ -34,7 +34,7 @@ pub(crate) enum Target {
     /// An embedded in-memory database, shared by all connections of one options value.
     Memory,
     /// A Turso Cloud database over HTTP. The URL has any `authToken` parameter removed.
-    Remote { url: String, libsql: bool },
+    Remote { url: String },
 }
 
 /// The statement used to open a transaction when none is given explicitly.
@@ -126,8 +126,7 @@ impl Default for SyncOptions {
 /// |---------------------------------------|--------------------------------------------|
 /// | `turso::memory:`                      | in-memory                                  |
 /// | `turso:data.db`, `turso:///abs/data.db` | embedded file                            |
-/// | `libsql://db-org.turso.io`            | Turso Cloud; transactions use `BEGIN`      |
-/// | `turso://db-org.turso.io`, `https://…`, `http://…` | Turso Cloud; transactions use `BEGIN CONCURRENT` |
+/// | `libsql://db-org.turso.io`, `turso://…`, `https://…`, `http://…` | Turso Cloud |
 ///
 /// Query parameters: `authToken=<token>` (remote), `mode=ro|rw|rwc|memory` (embedded).
 #[derive(Clone)]
@@ -199,16 +198,15 @@ impl TursoConnectOptions {
     }
 
     /// Connect to a Turso Cloud database over HTTP (requires the `serverless` feature at
-    /// connect time). `libsql://` URLs default to `BEGIN` transactions; `turso://`,
-    /// `https://` and `http://` URLs default to `BEGIN CONCURRENT`.
+    /// connect time). Transactions use `BEGIN` unless
+    /// [`concurrent_writes`](Self::concurrent_writes) or a
+    /// [transaction mode](Self::transaction_mode) is set.
     ///
     /// The URL is validated when connecting: it must be a `libsql://`, `turso://`,
     /// `https://` or `http://` URL with a host and no query string (pass the token with
     /// [`auth_token`](Self::auth_token)).
     pub fn remote(mut self, url: impl Into<String>) -> Self {
-        let url = url.into();
-        let libsql = url.starts_with("libsql:");
-        self.target = Target::Remote { url, libsql };
+        self.target = Target::Remote { url: url.into() };
         self.changed()
     }
 
@@ -255,8 +253,10 @@ impl TursoConnectOptions {
     /// transactions fail at commit and must be retried; see
     /// [`TursoError::is_conflict`](crate::TursoError::is_conflict).
     ///
-    /// Remote databases already default to `BEGIN CONCURRENT` (except `libsql://` URLs),
-    /// so this only affects embedded connections.
+    /// On Turso Cloud this only switches transactions to `BEGIN CONCURRENT`: the server
+    /// manages the journal. Concurrent writes on Turso Cloud must be enabled for the database
+    /// (an opt-in at the time of writing); servers without it reject `BEGIN CONCURRENT` with a
+    /// syntax error.
     ///
     /// DDL (`CREATE`, `ALTER`, `DROP`, ...) is rejected inside a `BEGIN CONCURRENT`
     /// transaction ("DDL statements require an exclusive transaction"); open such
@@ -268,8 +268,8 @@ impl TursoConnectOptions {
     }
 
     /// Statement used to open transactions that don't specify one, overriding the
-    /// default (`BEGIN`, or `BEGIN CONCURRENT` with [concurrent writes](Self::concurrent_writes)
-    /// and for non-`libsql://` remote databases). A single transaction can still choose its
+    /// default (`BEGIN`, or `BEGIN CONCURRENT` with [concurrent writes](Self::concurrent_writes)).
+    /// A single transaction can still choose its
     /// own statement with `Connection::begin_with`.
     ///
     /// [`Concurrent`](TursoTransactionMode::Concurrent) transactions cannot run DDL;
@@ -449,11 +449,10 @@ impl TursoConnectOptions {
         if let Some(mode) = self.transaction_mode {
             return mode.begin_sql();
         }
-        match &self.target {
-            Target::Remote { libsql: true, .. } => "BEGIN",
-            Target::Remote { libsql: false, .. } => "BEGIN CONCURRENT",
-            _ if self.concurrent_writes => "BEGIN CONCURRENT",
-            _ => "BEGIN",
+        if self.concurrent_writes {
+            "BEGIN CONCURRENT"
+        } else {
+            "BEGIN"
         }
     }
 

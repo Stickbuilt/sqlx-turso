@@ -23,8 +23,8 @@ impl TursoConnectOptions {
         let has_host = url.host_str().is_some_and(|h| !h.is_empty());
 
         let mut options = match scheme {
-            "http" | "https" => remote_options(url, false)?,
-            "turso" | "libsql" if has_host => remote_options(url, scheme == "libsql")?,
+            "http" | "https" => remote_options(url)?,
+            "turso" | "libsql" if has_host => remote_options(url)?,
             "turso" | "libsql" => {
                 let path = percent_decode_str(url.path())
                     .decode_utf8()
@@ -117,15 +117,11 @@ const PATH_SET: &percent_encoding::AsciiSet = &NON_ALPHANUMERIC
     .remove(b'~')
     .remove(b':');
 
-fn remote_options(url: &Url, libsql: bool) -> Result<TursoConnectOptions, Error> {
+fn remote_options(url: &Url) -> Result<TursoConnectOptions, Error> {
     let mut base = url.clone();
     base.set_query(None);
     base.set_fragment(None);
-    let mut options = TursoConnectOptions::new().remote(base.as_str().trim_end_matches('/'));
-    if let Target::Remote { libsql: l, .. } = &mut options.target {
-        *l = libsql;
-    }
-    Ok(options)
+    Ok(TursoConnectOptions::new().remote(base.as_str().trim_end_matches('/')))
 }
 
 #[cfg(test)]
@@ -158,27 +154,36 @@ mod tests {
         assert_eq!(
             target("libsql://db-org.turso.io?authToken=abc"),
             Target::Remote {
-                url: "libsql://db-org.turso.io".into(),
-                libsql: true
+                url: "libsql://db-org.turso.io".into()
             }
         );
         assert_eq!(
             target("turso://db-org.turso.io"),
             Target::Remote {
-                url: "turso://db-org.turso.io".into(),
-                libsql: false
+                url: "turso://db-org.turso.io".into()
             }
         );
         assert_eq!(
             target("https://db-org.turso.io/"),
             Target::Remote {
-                url: "https://db-org.turso.io".into(),
-                libsql: false
+                url: "https://db-org.turso.io".into()
             }
         );
 
+        // Every remote URL defaults to plain BEGIN; BEGIN CONCURRENT is opt-in.
+        for url in [
+            "libsql://db.turso.io?authToken=abc",
+            "turso://db.turso.io",
+            "https://db.turso.io",
+        ] {
+            let opts: TursoConnectOptions = url.parse().unwrap();
+            assert_eq!(opts.default_begin_sql(), "BEGIN");
+            assert_eq!(
+                opts.concurrent_writes(true).default_begin_sql(),
+                "BEGIN CONCURRENT"
+            );
+        }
         let opts: TursoConnectOptions = "libsql://db.turso.io?authToken=abc".parse().unwrap();
-        assert_eq!(opts.default_begin_sql(), "BEGIN");
         assert!(format!("{opts:?}").contains("<redacted>"));
         assert!(!format!("{opts:?}").contains("abc"));
     }

@@ -322,16 +322,40 @@ mod serverless {
     }
 
     #[tokio::test]
+    async fn transactions_work_with_every_remote_scheme() {
+        let Some((url, token)) = cloud() else { return };
+        let host = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+        for scheme in ["libsql", "turso", "https"] {
+            let opts = TursoConnectOptions::new()
+                .remote(format!("{scheme}://{host}"))
+                .auth_token(&token);
+            let mut conn = TursoConnection::connect_with(&opts).await.unwrap();
+            let mut tx = conn
+                .begin()
+                .await
+                .unwrap_or_else(|e| panic!("{scheme}: {e}"));
+            let n: i64 = sqlx::query_scalar("SELECT 1")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            assert_eq!(n, 1);
+            tx.commit().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn migrations_run_on_concurrent_default_url() {
         use sqlx_core::migrate::{Migration, MigrationType, Migrator};
         use sqlx_core::sql_str::SqlSafeStr;
         let Some((url, token)) = cloud() else { return };
 
-        // `turso://` URLs default to BEGIN CONCURRENT, which refuses DDL.
+        // With concurrent writes the default BEGIN is BEGIN CONCURRENT, which refuses DDL
+        // (and which servers without concurrent writes reject); migrations must not use it.
         let host = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
         let opts = TursoConnectOptions::new()
             .remote(format!("turso://{host}"))
-            .auth_token(&token);
+            .auth_token(&token)
+            .concurrent_writes(true);
         let mut conn = TursoConnection::connect_with(&opts).await.unwrap();
 
         let t = unique("sqlx_turso_mig");
