@@ -3,13 +3,14 @@ use crate::{Turso, TursoTypeInfo};
 
 pub(crate) use sqlx_core::column::*;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "offline", derive(serde::Serialize, serde::Deserialize))]
 pub struct TursoColumn {
     pub(crate) name: UStr,
     pub(crate) ordinal: usize,
     pub(crate) type_info: TursoTypeInfo,
 
-    #[serde(default)]
+    #[cfg_attr(feature = "offline", serde(default))]
     pub(crate) origin: ColumnOrigin,
 }
 

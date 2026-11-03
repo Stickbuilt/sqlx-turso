@@ -5,7 +5,8 @@ use crate::error::BoxDynError;
 
 pub(crate) use sqlx_core::type_info::*;
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "offline", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum DataType {
     // These variants correspond to the five storage classes.
     Null,
@@ -34,7 +35,8 @@ pub(crate) enum DataType {
 }
 
 /// Type information for a SQLite type.
-#[derive(Debug, Clone, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "offline", derive(serde::Serialize, serde::Deserialize))]
 pub struct TursoTypeInfo(pub(crate) DataType);
 
 impl Display for TursoTypeInfo {

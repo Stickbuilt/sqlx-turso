@@ -196,6 +196,7 @@ impl<'c> Executor<'c> for &'c mut TursoConnection {
 
     #[doc(hidden)]
 
+    #[cfg(feature = "offline")]
     fn describe<'e>(self, sql: SqlStr) -> BoxFuture<'e, Result<Describe<Turso>, Error>>
     where
         'c: 'e,
