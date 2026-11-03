@@ -84,7 +84,16 @@ impl TursoConnectOptions {
                 let encoded: Cow<'_, str> = utf8_percent_encode(&path, PATH_SET).into();
                 Url::parse(&format!("turso:{encoded}")).expect("valid URL")
             }
-            Target::Remote { url, .. } => Url::parse(url).expect("remote URL was validated"),
+            // `remote()` accepts any string; it is validated at connect time. A malformed
+            // one has no URL form, so use a placeholder that can't be connected to.
+            Target::Remote { url, .. } => match Url::parse(url) {
+                Ok(mut url) => {
+                    url.set_query(None);
+                    url.set_fragment(None);
+                    url
+                }
+                Err(_) => Url::parse("invalid:").expect("valid URL"),
+            },
         };
 
         if !self.is_remote() {
@@ -187,6 +196,16 @@ mod tests {
                 .parse::<TursoConnectOptions>()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn malformed_remote_url_does_not_panic() {
+        let opts = TursoConnectOptions::new().remote("not a url");
+        assert_eq!(opts.build_url().as_str(), "invalid:");
+        assert!(TursoConnectOptions::from_db_url(&opts.build_url()).is_err());
+
+        let opts = TursoConnectOptions::new().remote("libsql://db.turso.io?authToken=secret");
+        assert_eq!(opts.build_url().as_str(), "libsql://db.turso.io");
     }
 
     #[test]
