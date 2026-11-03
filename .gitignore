@@ -6,3 +6,4 @@ Cargo.lock.bak
 /toasty/
 /sea-orm/
 /sea-schema/
+.env

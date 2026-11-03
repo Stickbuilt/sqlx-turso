@@ -146,12 +146,14 @@ third-party drivers.
   forwards 1:1.
 - sea-schema: `sqlx-turso` feature enables `sea-query/thread-safe` (as sea-query-sqlx does).
 
-## Open questions for the user (2026-11-03)
-- Forward sqlx-turso `sync` / `serverless` through sea-orm features?
-- `sqlcipher_key` on a Turso URL currently errors (`BackendNotSupported`); keep?
-- `PoolConnection<Turso>` is 496 bytes (clippy `large_enum_variant` on sea-orm
-  `InnerConnection` with `mock`); box in sqlx-turso, box in sea-orm, or leave?
-- sea-orm-sync and sea-orm-cli have no Turso support (out of scope unless requested).
+## Decisions from the user (2026-11-03)
+- Not aiming for upstream merge; optimise for failsafe/correct/clean behaviour for our own use.
+- sea-orm + sea-orm-migration expose `sqlx-turso-serverless` and `sqlx-turso-sync` (e8d61106).
+- `sqlcipher_key` with a Turso URL is a connect-time error (never silently unencrypted).
+- `TursoConnection` state is boxed in sqlx-turso (pointer-sized; ad101ab).
+- Testing: user will provide TURSO_DATABASE_URL / TURSO_AUTH_TOKEN and free disk; then run
+  cloud tests and the full SeaORM integration suite against Turso.
+- sea-orm-sync and sea-orm-cli: no Turso support (out of scope unless requested).
 
 ## Turso incompatibilities found
 Phase 0 verified working (MVCC on and off): INSERT/UPDATE/UPSERT `RETURNING`; `last_insert_rowid`;
