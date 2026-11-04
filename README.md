@@ -29,7 +29,7 @@ Versions are pinned exactly: `sqlx-core` 0.9.0, `turso` 0.8.3, `turso_serverless
 ```toml
 [dependencies]
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio"] }
-sqlx-turso = { git = "https://github.com/bennichols/sqlx-turso", features = ["serverless", "sync"] }
+sqlx-turso = { git = "https://github.com/Stickbuilt/sqlx-turso", features = ["serverless", "sync"] }
 ```
 
 ```rust
@@ -71,9 +71,9 @@ sea-orm = { version = "2.0", features = ["sqlx-turso", "sqlx-turso-serverless", 
 sea-orm-migration = { version = "2.0", features = ["sqlx-turso", "runtime-tokio"] }
 
 [patch.crates-io]
-sea-orm = { git = "https://github.com/bennichols/sea-orm", branch = "turso" }
-sea-orm-migration = { git = "https://github.com/bennichols/sea-orm", branch = "turso" }
-sea-schema = { git = "https://github.com/bennichols/sea-schema", branch = "turso" }
+sea-orm = { git = "https://github.com/Stickbuilt/sea-orm", branch = "turso" }
+sea-orm-migration = { git = "https://github.com/Stickbuilt/sea-orm", branch = "turso" }
+sea-schema = { git = "https://github.com/Stickbuilt/sea-schema", branch = "turso" }
 ```
 
 ```rust
