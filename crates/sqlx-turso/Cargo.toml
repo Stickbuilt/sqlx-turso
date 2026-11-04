@@ -5,6 +5,8 @@ description = "Turso driver for SQLx: embedded, sync and Turso Cloud (HTTP) data
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository = "https://github.com/bennichols/sqlx-turso"
+readme = "../../README.md"
 publish = false
 
 [features]
