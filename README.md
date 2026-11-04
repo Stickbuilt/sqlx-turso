@@ -29,7 +29,7 @@ Versions are pinned exactly: `sqlx-core` 0.9.0, `turso` 0.8.3, `turso_serverless
 ```toml
 [dependencies]
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio"] }
-sqlx-turso = { git = "https://github.com/Stickbuilt/sqlx-turso", features = ["serverless", "sync"] }
+sqlx-turso = { git = "https://github.com/Stickbuilt/sqlx-turso", branch = "main", features = ["serverless", "sync"] }
 ```
 
 ```rust
@@ -56,6 +56,10 @@ let pool = TursoPoolOptions::new().connect_with(opts).await?;
 pool.connect_options().pull().await?;
 pool.connect_options().push().await?;
 ```
+
+Keep `branch = "main"` when you also use the SeaORM forks: they depend on this branch, and Cargo
+treats a git dependency with and without `branch` as two different crates, so the types would
+not match.
 
 If your build also enables `sqlx-core/offline` (for example through `sqlx`'s `macros`
 feature), enable this crate's `offline` feature too.
